@@ -13,6 +13,8 @@ add_executable(backend
   src/main.cpp
   src/logger.cpp
   src/db.cpp
+  src/config.cpp
+  src/dpapi_util.cpp
 )
 target_include_directories(backend PRIVATE src third_party)
 target_link_libraries(backend PRIVATE sqlite3 winhttp crypt32 ws2_32)
@@ -22,7 +24,11 @@ enable_testing()
 add_executable(backend_tests
   tests/test_main.cpp
   tests/test_db.cpp
+  tests/test_config.cpp
+  tests/test_dpapi.cpp
   src/db.cpp
+  src/config.cpp
+  src/dpapi_util.cpp
   src/logger.cpp
 )
 target_include_directories(backend_tests PRIVATE src third_party)
