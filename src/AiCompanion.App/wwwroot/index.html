@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI 陪伴</title>
+  <link rel="stylesheet" href="css/theme.css">
+  <link rel="stylesheet" href="vendor/highlight-github-dark.min.css">
+</head>
+<body>
+  <div id="app">
+    <header id="titlebar">
+      <div class="brand">✦ AI 陪伴</div>
+      <div class="tb-actions">
+        <button class="tb-btn" id="btn-min" title="最小化">─</button>
+        <button class="tb-btn" id="btn-max" title="最大化">□</button>
+        <button class="tb-btn tb-close" id="btn-close" title="关闭">✕</button>
+      </div>
+    </header>
+    <div id="main">
+      <aside id="sidebar">
+        <div class="side-head">
+          <button id="btn-new-session" class="btn-primary full">＋ 新对话</button>
+        </div>
+        <div id="session-list" class="session-list"></div>
+        <div class="side-foot">
+          <div id="persona-switcher" class="persona-row"></div>
+          <button id="btn-settings" class="btn-ghost full">⚙ 设置</button>
+        </div>
+      </aside>
+      <section id="chat">
+        <div id="chat-head">
+          <span id="chat-title">新对话</span>
+          <div class="chat-actions">
+            <button id="btn-export" class="btn-ghost">导出</button>
+            <button id="btn-clear" class="btn-ghost">清空</button>
+          </div>
+        </div>
+        <div id="messages"></div>
+        <div id="composer">
+          <textarea id="input" rows="3" placeholder="说点什么吧…（Enter 发送，Shift+Enter 换行）"></textarea>
+          <div class="composer-bar">
+            <span id="stream-hint" class="hint hidden">正在生成…</span>
+            <button id="btn-send" class="btn-primary">发送</button>
+            <button id="btn-stop" class="btn-danger hidden">停止</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div id="banner" class="banner hidden"></div>
+  <div id="toast" class="toast hidden"></div>
+
+  <div id="modal-settings" class="modal hidden">
+    <div class="modal-box">
+      <h3>设置</h3>
+      <label>API Base URL</label>
+      <input id="set-base-url" placeholder="https://api.deepseek.com/v1">
+      <label>API Key</label>
+      <input id="set-api-key" type="password" placeholder="sk-...（留空保持不变）">
+      <label>模型名称</label>
+      <input id="set-model" placeholder="deepseek-chat">
+      <label>保留上下文轮数（0 = 不限）</label>
+      <input id="set-keep-rounds" type="number" min="0" max="200">
+      <label>主题</label>
+      <select id="set-theme">
+        <option value="dark">深色</option>
+        <option value="light">亮色</option>
+        <option value="sakura">樱花粉</option>
+        <option value="midnight">午夜蓝</option>
+      </select>
+      <label class="chk"><input type="checkbox" id="set-proxy-enabled"> 使用 HTTP 代理</label>
+      <label>代理地址（留空 = 使用系统代理）</label>
+      <input id="set-proxy-host" placeholder="127.0.0.1">
+      <label>代理端口</label>
+      <input id="set-proxy-port" type="number" placeholder="7890">
+      <div class="modal-actions">
+        <button id="btn-settings-cancel" class="btn-ghost">取消</button>
+        <button id="btn-settings-save" class="btn-primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal-persona" class="modal hidden">
+    <div class="modal-box">
+      <h3 id="persona-modal-title">编辑人设</h3>
+      <label>名称</label><input id="pe-name">
+      <label>头像（emoji）</label><input id="pe-avatar" placeholder="🌸">
+      <label>开场白</label><input id="pe-greeting" placeholder="切换人设时的第一句话（可留空）">
+      <label>System Prompt</label><textarea id="pe-prompt" rows="4"></textarea>
+      <label>Temperature（0.1 - 2.0）</label>
+      <input id="pe-temp" type="number" min="0.1" max="2" step="0.1" value="0.8">
+      <div class="modal-actions">
+        <button id="btn-persona-cancel" class="btn-ghost">取消</button>
+        <button id="btn-persona-save" class="btn-primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="vendor/marked.min.js"></script>
+  <script src="vendor/highlight.min.js"></script>
+  <script src="vendor/purify.min.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
