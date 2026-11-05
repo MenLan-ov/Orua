@@ -5,6 +5,7 @@ obj/
 backend/build/
 # 运行时数据
 data/
+data_e2e/
 # 用户文件
 *.user
 *.suo

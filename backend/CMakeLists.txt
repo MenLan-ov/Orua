@@ -18,6 +18,7 @@ add_executable(backend
   src/openai_provider.cpp
   src/chat_service.cpp
   src/event_bus.cpp
+  src/server.cpp
 )
 target_include_directories(backend PRIVATE src third_party)
 target_link_libraries(backend PRIVATE sqlite3 winhttp crypt32 ws2_32)
