@@ -20,17 +20,6 @@ struct Message {
   std::string content;
   std::string created_at;
 };
-struct Persona {
-  int64_t id = 0;
-  std::string name;
-  std::string avatar = "🌸";
-  std::string greeting;
-  std::string system_prompt;
-  double temperature = 0.8;
-  bool is_active = false;
-  std::string created_at;
-  std::string updated_at;
-};
 struct Bot {
   int64_t id = 0;
   std::string name;
@@ -112,13 +101,6 @@ std::vector<GroupMember> listGroupMembers(int64_t groupId);
 GroupMessage appendGroupMessage(int64_t groupId, int64_t botId,
                                 const std::string& role, const std::string& content);
 std::vector<GroupMessage> listGroupMessages(int64_t groupId, int limit = 0);
-
-Persona createPersona(const Persona& p);
-bool updatePersona(const Persona& p);
-bool deletePersona(int64_t id);
-std::vector<Persona> listPersonas();
-bool activatePersona(int64_t id);
-std::optional<Persona> getActivePersona();
 
 std::optional<std::string> getSetting(const std::string& key);
 void setSetting(const std::string& key, const std::string& value);

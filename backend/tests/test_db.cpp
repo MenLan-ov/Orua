@@ -58,33 +58,6 @@ TEST_CASE("db: 会话与消息 CRUD + 级联删除") {
   std::filesystem::remove(path);
 }
 
-TEST_CASE("db: 人设 CRUD 与激活约束") {
-  auto path = tmpDb("ac_test_persona.db");
-  REQUIRE(db::open(path.string()));
-
-  db::Persona p;
-  p.name = "猫娘";
-  p.greeting = "喵~";
-  p.system_prompt = "你是猫娘";
-  p.temperature = 0.9;
-  auto created = db::createPersona(p);
-  CHECK(created.id > 0);
-
-  CHECK(db::activatePersona(created.id));
-  auto active = db::getActivePersona();
-  REQUIRE(active.has_value());
-  CHECK(active->name == "猫娘");
-
-  // 激活中的人设不允许删除
-  CHECK(db::deletePersona(created.id) == false);
-
-  created.greeting = "喵喵~";
-  CHECK(db::updatePersona(created));
-  CHECK(db::listPersonas().size() == 1);  // 本任务起不再播种默认人设
-  db::close();
-  std::filesystem::remove(path);
-}
-
 TEST_CASE("db: settings 读写") {
   auto path = tmpDb("ac_test_settings.db");
   REQUIRE(db::open(path.string()));

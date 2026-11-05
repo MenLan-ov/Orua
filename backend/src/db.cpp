@@ -135,19 +135,6 @@ Message rowToMessage(sqlite3_stmt* st) {
   return {colInt(st, 0), colInt(st, 1), colText(st, 2), colText(st, 3),
           colText(st, 4)};
 }
-Persona rowToPersona(sqlite3_stmt* st) {
-  Persona p;
-  p.id = colInt(st, 0);
-  p.name = colText(st, 1);
-  p.avatar = colText(st, 2);
-  p.greeting = colText(st, 3);
-  p.system_prompt = colText(st, 4);
-  p.temperature = sqlite3_column_double(st, 5);
-  p.is_active = colInt(st, 6) != 0;
-  p.created_at = colText(st, 7);
-  p.updated_at = colText(st, 8);
-  return p;
-}
 Bot rowToBot(sqlite3_stmt* st) {
   Bot b;
   b.id = colInt(st, 0);
@@ -197,19 +184,22 @@ bool open(const std::string& dbPath) {
             [&](sqlite3_stmt* st) { hasPersonas = colInt(st, 0) > 0; });
       bool defSet = false;
       if (hasPersonas) {
-        for (auto& p : listPersonas()) {
-          Bot b;
-          b.name = p.name;
-          b.avatar = p.avatar;
-          b.greeting = p.greeting;
-          b.system_prompt = p.system_prompt;
-          b.temperature = p.temperature;
-          Bot nb = createBot(b);
-          if (p.is_active && !defSet) {
-            setSetting("default_bot_id", std::to_string(nb.id));
-            defSet = true;
-          }
-        }
+        // 直接查询 personas 表（Persona 结构体与 CRUD 已随本任务移除，表仅作迁移数据源）
+        query("SELECT name,avatar,greeting,system_prompt,temperature,is_active "
+              "FROM personas ORDER BY id ASC", {},
+              [&](sqlite3_stmt* st) {
+                Bot b;
+                b.name = colText(st, 0);
+                b.avatar = colText(st, 1);
+                b.greeting = colText(st, 2);
+                b.system_prompt = colText(st, 3);
+                b.temperature = sqlite3_column_double(st, 4);
+                Bot nb = createBot(b);
+                if (colInt(st, 5) != 0 && !defSet) {
+                  setSetting("default_bot_id", std::to_string(nb.id));
+                  defSet = true;
+                }
+              });
       } else {
         Bot d;
         d.name = "默认助手";
@@ -327,67 +317,6 @@ std::optional<Message> lastMessageByRole(int64_t sessionId,
         "WHERE session_id=? AND role=? ORDER BY id DESC LIMIT 1",
         {std::to_string(sessionId), role},
         [&](sqlite3_stmt* st) { out = rowToMessage(st); });
-  return out;
-}
-
-Persona createPersona(const Persona& p) {
-  std::lock_guard<std::recursive_mutex> lock(g_mtx);
-  std::string ts = nowIso();
-  execute("INSERT INTO personas(name,avatar,greeting,system_prompt,temperature,"
-          "is_active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-          {p.name, p.avatar, p.greeting, p.system_prompt,
-           std::to_string(p.temperature), p.is_active ? "1" : "0", ts, ts});
-  Persona out = p;
-  out.id = sqlite3_last_insert_rowid(g_db);
-  out.created_at = out.updated_at = ts;
-  if (p.is_active) activatePersona(out.id);
-  return out;
-}
-
-bool updatePersona(const Persona& p) {
-  std::lock_guard<std::recursive_mutex> lock(g_mtx);
-  execute("UPDATE personas SET name=?,avatar=?,greeting=?,system_prompt=?,"
-          "temperature=?,updated_at=? WHERE id=?",
-          {p.name, p.avatar, p.greeting, p.system_prompt,
-           std::to_string(p.temperature), nowIso(), std::to_string(p.id)});
-  return sqlite3_changes(g_db) > 0;
-}
-
-bool deletePersona(int64_t id) {
-  std::lock_guard<std::recursive_mutex> lock(g_mtx);
-  bool active = false;
-  query("SELECT is_active FROM personas WHERE id=?",
-        {std::to_string(id)},
-        [&](sqlite3_stmt* st) { active = colInt(st, 0) != 0; });
-  if (active) return false;
-  execute("DELETE FROM personas WHERE id=?", {std::to_string(id)});
-  return true;
-}
-
-std::vector<Persona> listPersonas() {
-  std::lock_guard<std::recursive_mutex> lock(g_mtx);
-  std::vector<Persona> out;
-  query("SELECT id,name,avatar,greeting,system_prompt,temperature,is_active,"
-        "created_at,updated_at FROM personas ORDER BY id ASC",
-        {}, [&](sqlite3_stmt* st) { out.push_back(rowToPersona(st)); });
-  return out;
-}
-
-bool activatePersona(int64_t id) {
-  std::lock_guard<std::recursive_mutex> lock(g_mtx);
-  std::string ts = nowIso();
-  execute("UPDATE personas SET is_active=0");
-  execute("UPDATE personas SET is_active=1, updated_at=? WHERE id=?",
-          {ts, std::to_string(id)});
-  return sqlite3_changes(g_db) > 0;
-}
-
-std::optional<Persona> getActivePersona() {
-  std::lock_guard<std::recursive_mutex> lock(g_mtx);
-  std::optional<Persona> out;
-  query("SELECT id,name,avatar,greeting,system_prompt,temperature,is_active,"
-        "created_at,updated_at FROM personas WHERE is_active=1 LIMIT 1",
-        {}, [&](sqlite3_stmt* st) { out = rowToPersona(st); });
   return out;
 }
 
