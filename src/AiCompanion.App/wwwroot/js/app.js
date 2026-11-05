@@ -930,7 +930,11 @@ App.registerCommand('group-interject', async () => {
   try {
     await App.api.post(`/api/v1/groups/${gid}/interject`, { content });
     input.value = '';
-    await reconcileGroupMessages();  // SSE 事件到达时由 gmsgSeen 去重
+    // 有在途打字机（活跃轮次）时跳过全量重建：reconcile 的 innerHTML='' 会抹掉流式气泡；
+    // 插话消息由 SSE interject 事件即时渲染（gmsgSeen 去重），全量重建推迟到 turn_end reconcile
+    if (App.state.typers.size === 0) {
+      await reconcileGroupMessages();  // 无在途打字机：保持原重建；SSE 事件到达时由 gmsgSeen 去重
+    }
   } catch (e) { toast(e.message); }
 });
 
