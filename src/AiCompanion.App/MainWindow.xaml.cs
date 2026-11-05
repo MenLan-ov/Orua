@@ -27,7 +27,6 @@ public partial class MainWindow : Window
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         EnableRoundedCorners();
-        InstallCaptionHitTest();
         try
         {
             _backend = new BackendProcess(BackendExe, DataDir, ReadApiPort());
@@ -38,7 +37,7 @@ public partial class MainWindow : Window
         {
             MessageBox.Show(this,
                 "后端启动失败：" + ex.Message + "\n\n请确认 backend.exe 已构建并位于程序目录。",
-                "AI 陪伴", MessageBoxButton.OK, MessageBoxImage.Error);
+                "Orua", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         await InitWebViewAsync();
     }
@@ -109,51 +108,48 @@ public partial class MainWindow : Window
                     case BridgeProtocol.ActionMinimize: WindowState = WindowState.Minimized; break;
                     case BridgeProtocol.ActionMaximize: WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized; break;
                     case BridgeProtocol.ActionClose: Close(); break;
+                    case BridgeProtocol.ActionDrag: BeginCaptionDrag(); break;
+                    case BridgeProtocol.ActionMaxDbl: SendCaptionDblClk(); break;
+                    case BridgeProtocol.ActionSysMenu: ShowSystemMenu(); break;
                 }
             });
         }
         catch { }
     }
 
-    // 标题栏拖拽：WM_NCHITTEST 由系统直接发给顶层 WPF 窗口（即使光标
-    // 位于 WebView2 子 HWND 上），对标题栏条带返回 HTCAPTION 即可获得
-    // 系统原生拖拽/双击最大化/右键系统菜单，无需 JS 转发。
-    private const int WmNcHitTest = 0x0084;
+    // 标题栏交互：v1 的 WM_NCHITTEST→HTCAPTION 方案失效——鼠标按下命中 WebView2
+    // 子窗口，其客户区 WM_LBUTTONDOWN 直接投递，顶层窗口 HTCAPTION 判定不参与路由。
+    // 现由 JS 转发事件，合成 WM_NCLBUTTONDOWN 走 DefWindowProc 原生拖拽循环。
+    private const int WmNcLButtonDown = 0x00A1;
+    private const int WmNcLButtonDblClk = 0x00A3;
+    private const int WmSysCommand = 0x0112;
     private const int HtCaption = 2;
-    private const double TitlebarDip = 42;   // 与 css 的 #titlebar 高度一致
-    private const double ActionsDip = 130;   // 右侧 3 个按钮 + 间距 + 内边距
+    private const uint TpmReturnCmd = 0x0100;
+    private const uint TpmLeftButton = 0x0000;
+    private const uint TpmRightButton = 0x0002;
 
-    private bool IsCaptionStrip(IntPtr win, int x, int y)
-    {
-        GetClientRect(win, out var rc);
-        var pt = new Point();
-        ClientToScreen(win, ref pt);
-        double dpi = GetDpiForWindow(win) / 96.0;
-        double top = pt.Y;
-        double right = pt.X + rc.Right;
-        return x >= pt.X && x < right - ActionsDip * dpi &&
-               y >= top && y < top + TitlebarDip * dpi;
-    }
-
-    private void InstallCaptionHitTest()
+    private void BeginCaptionDrag()
     {
         var hwnd = new WindowInteropHelper(this).Handle;
-        HwndSource.FromHwnd(hwnd)?.AddHook(WndProc);
+        _ = ReleaseCapture();
+        _ = SendMessage(hwnd, WmNcLButtonDown, (IntPtr)HtCaption, IntPtr.Zero);
     }
 
-    private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    private void SendCaptionDblClk()
     {
-        if (msg == WmNcHitTest)
-        {
-            var x = unchecked((short)(long)lParam);
-            var y = unchecked((short)((long)lParam >> 16));
-            if (IsCaptionStrip(hwnd, x, y))
-            {
-                handled = true;
-                return (IntPtr)HtCaption;
-            }
-        }
-        return IntPtr.Zero;
+        var hwnd = new WindowInteropHelper(this).Handle;
+        _ = SendMessage(hwnd, WmNcLButtonDblClk, (IntPtr)HtCaption, IntPtr.Zero);
+    }
+
+    private void ShowSystemMenu()
+    {
+        var hwnd = new WindowInteropHelper(this).Handle;
+        IntPtr menu = GetSystemMenu(hwnd, false);
+        if (menu == IntPtr.Zero) return;
+        GetCursorPos(out var pt);
+        uint cmd = TrackPopupMenu(menu, TpmReturnCmd | TpmLeftButton | TpmRightButton,
+                                  pt.X, pt.Y, 0, hwnd, IntPtr.Zero);
+        if (cmd != 0) _ = SendMessage(hwnd, WmSysCommand, (IntPtr)cmd, IntPtr.Zero);
     }
 
     private void EnableRoundedCorners()
@@ -173,16 +169,20 @@ public partial class MainWindow : Window
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 
     [DllImport("user32.dll")]
-    private static extern uint GetDpiForWindow(IntPtr hwnd);
+    private static extern bool ReleaseCapture();
 
     [DllImport("user32.dll")]
-    private static extern bool GetClientRect(IntPtr hwnd, out Rect rc);
+    private static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
 
     [DllImport("user32.dll")]
-    private static extern bool ClientToScreen(IntPtr hwnd, ref Point pt);
+    private static extern IntPtr GetSystemMenu(IntPtr hwnd, bool bRevert);
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct Rect { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")]
+    private static extern uint TrackPopupMenu(IntPtr hMenu, uint flags, int x, int y,
+                                              int reserved, IntPtr hwnd, IntPtr rect);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out Point pt);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct Point { public int X, Y; }

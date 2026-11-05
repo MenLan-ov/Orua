@@ -647,11 +647,14 @@ messagesEl.addEventListener('click', (e) => {
 
 /* WPF 桥接：窗口按钮 + 后端状态 */
 const wv = window.chrome && window.chrome.webview;
+function winMsg(action) {
+  console.log('[bridge]', action);
+  if (wv) wv.postMessage({ type: 'window', payload: { action } });
+}
 if (wv) {
-  $('btn-min').addEventListener('click', () => wv.postMessage({ type: 'window', payload: { action: 'minimize' } }));
-  $('btn-max').addEventListener('click', () => wv.postMessage({ type: 'window', payload: { action: 'maximize' } }));
-  $('btn-close').addEventListener('click', () => wv.postMessage({ type: 'window', payload: { action: 'close' } }));
-  // 标题栏拖拽/双击最大化由 WPF 侧 WM_NCHITTEST→HTCAPTION 原生处理，无需 JS 转发
+  $('btn-min').addEventListener('click', () => winMsg('minimize'));
+  $('btn-max').addEventListener('click', () => winMsg('maximize'));
+  $('btn-close').addEventListener('click', () => winMsg('close'));
   wv.addEventListener('message', (e) => {
     try {
       const m = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
@@ -659,3 +662,18 @@ if (wv) {
     } catch (_) {}
   });
 }
+// 标题栏拖动/双击最大化/右键系统菜单：转发给 WPF 合成原生窗口消息
+const titlebarEl = $('titlebar');
+titlebarEl.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 || e.target.closest('.tb-actions')) return;
+  winMsg('drag');
+});
+titlebarEl.addEventListener('dblclick', (e) => {
+  if (e.target.closest('.tb-actions')) return;
+  winMsg('maxdbl');
+});
+titlebarEl.addEventListener('contextmenu', (e) => {
+  if (e.target.closest('.tb-actions')) return;
+  e.preventDefault();
+  winMsg('sysmenu');
+});
