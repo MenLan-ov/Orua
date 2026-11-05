@@ -19,30 +19,136 @@
     </header>
     <div id="main">
       <aside id="sidebar">
-        <div class="side-head">
-          <button id="btn-new-session" class="btn-primary full">＋ 新对话</button>
-        </div>
-        <div id="session-list" class="session-list"></div>
-        <div class="side-foot">
-          <div id="persona-switcher" class="persona-row"></div>
-          <button id="btn-settings" class="btn-ghost full">⚙ 设置</button>
-        </div>
-      </aside>
-      <section id="chat">
-        <div id="chat-head">
-          <span id="chat-title">新对话</span>
-          <div class="chat-actions">
-            <button id="btn-export" class="btn-ghost">导出</button>
-            <button id="btn-clear" class="btn-ghost">清空</button>
+        <div class="side-profile">
+          <div class="profile-avatar">O</div>
+          <div class="profile-info">
+            <div class="profile-name">Orua</div>
+            <div class="profile-sub">你的 AI 伙伴</div>
           </div>
         </div>
-        <div id="messages"></div>
-        <div id="composer">
-          <textarea id="input" rows="3" placeholder="说点什么吧…（Enter 发送，Shift+Enter 换行）"></textarea>
-          <div class="composer-bar">
-            <span id="stream-hint" class="hint hidden">正在生成…</span>
-            <button id="btn-send" class="btn-primary">发送</button>
-            <button id="btn-stop" class="btn-danger hidden">停止</button>
+        <div class="side-search">
+          <input id="search-input" type="text" placeholder="搜索会话 / 机器人 / 群…">
+        </div>
+        <nav class="side-tabs">
+          <button class="tab-btn active" data-view="messages">消息</button>
+          <button class="tab-btn" data-view="bots">机器人</button>
+          <button class="tab-btn" data-view="groups">群聊</button>
+        </nav>
+        <div class="side-actions">
+          <button id="btn-new-session" class="btn-primary full">＋ 新对话</button>
+          <button id="btn-new-bot" class="btn-primary full hidden">＋ 新机器人</button>
+          <button id="btn-new-group" class="btn-primary full hidden">＋ 新建群</button>
+        </div>
+        <div class="list-area">
+          <div id="session-list" class="session-list"></div>
+          <div id="bot-list" class="bot-list hidden"></div>
+          <div id="group-list" class="group-list hidden"></div>
+        </div>
+        <div class="side-foot">
+          <div class="foot-status">
+            <span id="status-dot" class="status-dot"></span>
+            <span id="status-text">连接中…</span>
+          </div>
+          <div class="foot-buttons">
+            <span id="foot-version" class="foot-version">v2.0</span>
+            <button id="btn-settings" class="btn-ghost">⚙ 设置</button>
+            <button id="btn-quit" class="btn-ghost">退出</button>
+          </div>
+        </div>
+      </aside>
+
+      <section id="content">
+        <!-- 消息视图 -->
+        <div id="view-messages" class="view">
+          <div class="chat-head">
+            <span id="chat-title">新对话</span>
+            <span id="chat-sub" class="chat-sub"></span>
+            <div class="chat-actions">
+              <button id="btn-switch-bot" class="btn-ghost hidden">切换机器人</button>
+              <button id="btn-export" class="btn-ghost">导出</button>
+              <button id="btn-clear" class="btn-ghost">清空</button>
+            </div>
+          </div>
+          <div id="chat-empty" class="empty-state">
+            <div class="empty-icon">✦</div>
+            <div class="empty-title">开始新的对话</div>
+            <div class="empty-sub">点击左侧「＋ 新对话」选择一位机器人</div>
+          </div>
+          <div id="messages" class="messages hidden"></div>
+          <div id="composer" class="composer hidden">
+            <textarea id="input" rows="3" placeholder="说点什么吧…（Enter 发送，Shift+Enter 换行）"></textarea>
+            <div class="composer-bar">
+              <span id="stream-hint" class="hint hidden">正在生成…</span>
+              <button id="btn-send" class="btn-primary">发送</button>
+              <button id="btn-stop" class="btn-danger hidden">停止</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 机器人视图 -->
+        <div id="view-bots" class="view hidden">
+          <div id="bots-empty" class="empty-state">
+            <div class="empty-icon">🤖</div>
+            <div class="empty-title">还没有机器人</div>
+            <div class="empty-sub">点击「＋ 新机器人」创建你的第一位 AI 伙伴</div>
+          </div>
+          <div id="bot-detail" class="bot-detail hidden">
+            <div class="bot-detail-head">
+              <div id="bot-detail-avatar" class="bot-detail-avatar">🤖</div>
+              <div class="bot-detail-info">
+                <div id="bot-detail-name" class="bot-detail-name"></div>
+                <div id="bot-detail-sub" class="bot-detail-sub"></div>
+              </div>
+              <div class="bot-detail-actions">
+                <button id="btn-bot-edit" class="btn-ghost">编辑</button>
+              </div>
+            </div>
+            <div class="bot-detail-block">
+              <div class="bot-detail-label">System Prompt</div>
+              <div id="bot-detail-prompt" class="bot-detail-text"></div>
+            </div>
+            <div class="bot-detail-block">
+              <div class="bot-detail-label">参数与 API</div>
+              <div id="bot-detail-meta" class="bot-detail-text"></div>
+            </div>
+            <div class="bot-detail-block">
+              <div class="bot-detail-label">开场白</div>
+              <div id="bot-detail-greeting" class="bot-detail-text"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 群聊视图 -->
+        <div id="view-groups" class="view hidden">
+          <div id="group-empty" class="empty-state">
+            <div class="empty-icon">👥</div>
+            <div class="empty-title">还没有群聊</div>
+            <div class="empty-sub">点击「＋ 新建群」拉 2-10 个机器人进群围观</div>
+          </div>
+          <div id="group-room" class="group-room hidden">
+            <div class="group-head">
+              <span id="group-title">群聊</span>
+              <span id="group-sub" class="group-sub"></span>
+              <div class="group-actions">
+                <button id="btn-group-members" class="btn-ghost">成员</button>
+                <button id="btn-group-rename" class="btn-ghost">设置</button>
+              </div>
+            </div>
+            <div id="group-messages" class="group-messages"></div>
+            <div class="group-controls">
+              <input id="group-topic" class="group-topic" placeholder="开场话题（可选，开聊时生效）">
+              <div class="group-control-buttons">
+                <button id="btn-group-start" class="btn-primary">开聊</button>
+                <button id="btn-group-pause" class="btn-ghost hidden">暂停</button>
+                <button id="btn-group-resume" class="btn-primary hidden">继续</button>
+                <button id="btn-group-stop" class="btn-danger hidden">停止</button>
+                <span id="group-turn" class="group-turn hidden"></span>
+              </div>
+            </div>
+            <div class="group-interject">
+              <input id="group-interject-input" placeholder="插句话…（Enter 发送）">
+              <button id="btn-group-interject" class="btn-primary">插话</button>
+            </div>
           </div>
         </div>
       </section>
@@ -52,9 +158,11 @@
   <div id="banner" class="banner hidden"></div>
   <div id="toast" class="toast hidden"></div>
 
+  <!-- 设置弹窗 -->
   <div id="modal-settings" class="modal hidden">
     <div class="modal-box">
       <h3>设置</h3>
+      <div class="modal-section-title">默认 API 配置（机器人未单独配置时使用）</div>
       <label>API Base URL</label>
       <input id="set-base-url" placeholder="https://api.deepseek.com/v1">
       <label>API Key</label>
@@ -65,7 +173,7 @@
       <input id="set-keep-rounds" type="number" min="0" max="200">
       <label>主题</label>
       <select id="set-theme">
-        <option value="dark">深色</option>
+        <option value="dark">深色（默认）</option>
         <option value="light">亮色</option>
         <option value="sakura">樱花粉</option>
         <option value="midnight">午夜蓝</option>
@@ -82,18 +190,63 @@
     </div>
   </div>
 
-  <div id="modal-persona" class="modal hidden">
+  <!-- 机器人编辑弹窗 -->
+  <div id="modal-bot" class="modal hidden">
     <div class="modal-box">
-      <h3 id="persona-modal-title">编辑人设</h3>
-      <label>名称</label><input id="pe-name">
-      <label>头像（emoji）</label><input id="pe-avatar" placeholder="🌸">
-      <label>开场白</label><input id="pe-greeting" placeholder="切换人设时的第一句话（可留空）">
-      <label>System Prompt</label><textarea id="pe-prompt" rows="4"></textarea>
+      <h3 id="bot-modal-title">新建机器人</h3>
+      <label>名称</label><input id="be-name">
+      <label>头像（emoji）</label><input id="be-avatar" placeholder="🤖">
+      <label>开场白</label><input id="be-greeting" placeholder="切换机器人时的第一句话（可留空）">
+      <label>System Prompt</label><textarea id="be-prompt" rows="4"></textarea>
       <label>Temperature（0.1 - 2.0）</label>
-      <input id="pe-temp" type="number" min="0.1" max="2" step="0.1" value="0.8">
+      <input id="be-temp" type="number" min="0.1" max="2" step="0.1" value="0.8">
+      <div class="modal-section-title">API 覆盖项（留空 = 使用默认配置）</div>
+      <label>API Base URL</label><input id="be-api-base" placeholder="https://api.example.com/v1">
+      <label>API Key</label><input id="be-api-key" type="password" placeholder="留空 = 使用默认 Key">
+      <label class="chk"><input type="checkbox" id="be-key-clear"> 清除已保存的独立 Key</label>
+      <label>模型名称</label><input id="be-api-model" placeholder="留空 = 使用默认模型">
       <div class="modal-actions">
-        <button id="btn-persona-cancel" class="btn-ghost">取消</button>
-        <button id="btn-persona-save" class="btn-primary">保存</button>
+        <button id="btn-bot-cancel" class="btn-ghost">取消</button>
+        <button id="btn-bot-save" class="btn-primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 群编辑弹窗 -->
+  <div id="modal-group" class="modal hidden">
+    <div class="modal-box">
+      <h3 id="group-modal-title">新建群聊</h3>
+      <label>群名称</label><input id="ge-name">
+      <label>开场话题（可选）</label><input id="ge-topic">
+      <label>选择成员（2-10 个，勾选顺序即发言顺序）</label>
+      <div id="ge-members" class="member-checks"></div>
+      <div class="modal-actions">
+        <button id="btn-group-cancel" class="btn-ghost">取消</button>
+        <button id="btn-group-save" class="btn-primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 新对话弹窗 -->
+  <div id="modal-new-session" class="modal hidden">
+    <div class="modal-box">
+      <h3>新对话</h3>
+      <label>选择机器人</label>
+      <div id="ns-bots" class="ns-bots"></div>
+      <div class="modal-actions">
+        <button id="btn-ns-cancel" class="btn-ghost">取消</button>
+        <button id="btn-ns-save" class="btn-primary">开始对话</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 群成员弹窗 -->
+  <div id="modal-group-members" class="modal hidden">
+    <div class="modal-box">
+      <h3 id="gm-title">群成员</h3>
+      <div id="gm-list" class="gm-list"></div>
+      <div class="modal-actions">
+        <button id="btn-gm-close" class="btn-ghost">关闭</button>
       </div>
     </div>
   </div>
