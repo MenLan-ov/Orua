@@ -41,7 +41,7 @@ Windows 桌面 AI 陪伴程序：用户连接外部 OpenAI 兼容大模型 API�
 │  │  backend.exe (C++20 · cpp-httplib · sqlite3 内嵌)              │        │
 │  │  ├─ 路由层 /api/v1/*                                            │        │
 │  │  ├─ ChatService：上下文组装（system prompt + 最近 N 轮）         │        │
-│  │  ├─ ILlmProvider → OpenAiCompatProvider（httplib::Client+SSL）  │        │
+│  │  ├─ ILlmProvider → OpenAiCompatProvider（WinHTTP+Schannel）      │        │
 │  │  ├─ EventBus → 插件 Webhook 分发（可选）                         │        │
 │  │  └─ 存储层：data/app.db (SQLite WAL)、data/config.json          │        │
 │  └───────────────┬───────────────────────────────────────────────┘        │
@@ -53,7 +53,7 @@ Windows 桌面 AI 陪伴程序：用户连接外部 OpenAI 兼容大模型 API�
 ```
 
 选型理由：
-- **cpp-httplib**：单头文件、内建 HTTP Client（含 SSL）、原生 chunked/SSE 流式，单用户桌面场景性能绰绰有余。
+- **cpp-httplib**：单头文件、原生 chunked/SSE 流式，用于本地 HTTP 服务端（无 SSL 需求）；上游 HTTPS 客户端用 Windows 原生 **WinHTTP**（Schannel TLS），零外部 SSL 依赖，原生支持代理配置。
 - **sqlite3 amalgamation**：单 .c/.h 静态编译进 exe，零外部运行时依赖。
 - **nlohmann/json**：单头文件 JSON，用于 API 序列化与 config.json。
 - **doctest**：单头文件测试框架，`ctest` 运行核心逻辑断言测试。
@@ -83,7 +83,8 @@ D:\One\
 │           ├── js\app.js            # 聊天逻辑 + SSE 流式渲染 + 命令注册表
 │           └── vendor\
 │               ├── marked.min.js    # 本地打包，离线可用
-│               └── highlight.min.js # + 高亮主题 css
+│               ├── highlight.min.js # + 高亮主题 css
+│               └── purify.min.js    # DOMPurify，渲染前消毒防 XSS
 ├── backend\
 │   ├── CMakeLists.txt
 │   ├── src\
