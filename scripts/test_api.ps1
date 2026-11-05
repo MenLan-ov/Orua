@@ -38,6 +38,50 @@ Assert-True ($c.data.model -eq 'demo-model') 'config model roundtrip'
 Assert-True ($c.data.theme -eq 'sakura') 'config theme roundtrip'
 Assert-True ($c.data.keep_rounds -eq '5') 'config keep_rounds roundtrip'
 
+# 聊天流（LLM_MOCK 假流；载荷经临时文件传递，避免 PS 5.1 原生参数转义问题）
+$pfile = Join-Path $env:TEMP 'ac_payload.json'
+[IO.File]::WriteAllText($pfile, '{"session_id":' + $sid + ',"content":"hello mock"}')
+$tmp = Join-Path $env:TEMP 'ac_sse.txt'
+& curl.exe -s -N -X POST "$base/api/v1/chat/stream" -H "Content-Type: application/json" --data-binary "@$pfile" -o $tmp
+$sse = Get-Content $tmp -Raw -Encoding UTF8
+Remove-Item $tmp, $pfile
+Assert-True ($sse -match 'event: delta') 'sse delta event'
+Assert-True ($sse -match 'event: done') 'sse done event'
+
+# 消息已落库（user + assistant 各一条）
+$m = Invoke-RestMethod "$base/api/v1/messages?session_id=$sid&limit=10"
+Assert-True ($m.data.Count -eq 2) "messages count=$($m.data.Count)"
+Assert-True (($m.data | Where-Object role -eq 'assistant').content.Length -gt 0) 'assistant message stored'
+
+# 重新生成（删除最后一条 assistant 并重跑，仍应有 2 条）
+$rfile = Join-Path $env:TEMP 'ac_reg.json'
+[IO.File]::WriteAllText($rfile, '{"session_id":' + $sid + '}')
+$tmp2 = Join-Path $env:TEMP 'ac_sse2.txt'
+& curl.exe -s -N -X POST "$base/api/v1/chat/regenerate" -H "Content-Type: application/json" --data-binary "@$rfile" -o $tmp2
+$sse2 = Get-Content $tmp2 -Raw -Encoding UTF8
+Remove-Item $tmp2, $rfile
+Assert-True ($sse2 -match 'event: done') 'regenerate done'
+$m2 = Invoke-RestMethod "$base/api/v1/messages?session_id=$sid&limit=10"
+Assert-True ($m2.data.Count -eq 2) 'regenerate keeps 2 messages'
+
+# 导出 md 与 json
+$tmp3 = Join-Path $env:TEMP 'ac_export.md'
+& curl.exe -s -X POST "$base/api/v1/export?session_id=$sid&format=md" -o $tmp3
+$md = Get-Content $tmp3 -Raw -Encoding UTF8
+Remove-Item $tmp3
+Assert-True ($md -match '用户') 'export md contains user label'
+
+$tmp4 = Join-Path $env:TEMP 'ac_export.json'
+& curl.exe -s -X POST "$base/api/v1/export?session_id=$sid&format=json" -o $tmp4
+$j = Get-Content $tmp4 -Raw -Encoding UTF8 | ConvertFrom-Json
+Remove-Item $tmp4
+Assert-True ($j.messages.Count -eq 2) 'export json message count'
+
+# 清空会话消息
+Invoke-RestMethod "$base/api/v1/messages?session_id=$sid" -Method Delete | Out-Null
+$m3 = Invoke-RestMethod "$base/api/v1/messages?session_id=$sid"
+Assert-True ($m3.data.Count -eq 0) 'messages cleared'
+
 # 清理：删除测试会话
 Invoke-RestMethod "$base/api/v1/sessions/$sid" -Method Delete | Out-Null
 $list = Invoke-RestMethod "$base/api/v1/sessions"

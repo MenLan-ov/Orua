@@ -21,7 +21,7 @@ std::vector<llm::ChatMsg> buildContext(const db::Persona& persona,
     if (history[i].role == "user" || history[i].role == "assistant")
       out.push_back({history[i].role, history[i].content});
   }
-  out.push_back({"user", newUser});
+  if (!newUser.empty()) out.push_back({"user", newUser});
   return out;
 }
 

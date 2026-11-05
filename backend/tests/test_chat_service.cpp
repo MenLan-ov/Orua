@@ -68,3 +68,10 @@ TEST_CASE("util: utf8Truncate 不截断中文中间") {
   CHECK(utf8Truncate("abc", 2) == "ab");
   CHECK(utf8Truncate("你好", 10) == "你好");
 }
+
+TEST_CASE("chat: newUser 为空时不追加（regenerate 场景）") {
+  std::vector<db::Message> h = {msg(1, "user"), msg(2, "assistant")};
+  auto ctx = chat::buildContext(makePersona(), h, 10, "");
+  REQUIRE(ctx.size() == 3);  // system + user + assistant，不重复追加 user
+  CHECK(ctx[2].content == "content-2");
+}

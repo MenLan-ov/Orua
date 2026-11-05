@@ -3,6 +3,7 @@
 
 #include "config.h"
 #include "db.h"
+#include "event_bus.h"
 #include "logger.h"
 #include "server.h"
 
@@ -27,6 +28,7 @@ int main(int argc, char** argv) {
   }
 
   httplib::Server svr;
+  ev::EventBus::instance().loadPlugins(sc.plugins);
   srv::registerRoutes(svr, sc.static_dir);
 
   for (int port = sc.port; port <= sc.port + 10; ++port) {

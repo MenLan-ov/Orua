@@ -1,13 +1,20 @@
 #include "server.h"
 
+#include <atomic>
 #include <ctime>
+#include <map>
+#include <memory>
+#include <mutex>
 
+#include "chat_service.h"
 #include "config.h"
 #include "db.h"
 #include "dpapi_util.h"
 #include "event_bus.h"
 #include "json_util.h"
+#include "llm_provider.h"
 #include "logger.h"
+#include "openai_provider.h"
 
 namespace srv {
 namespace {
@@ -52,6 +59,199 @@ json messageToJson(const db::Message& m) {
           {"role", m.role},
           {"content", m.content},
           {"created_at", m.created_at}};
+}
+
+std::mutex g_stopMtx;
+std::map<int64_t, std::shared_ptr<std::atomic_bool>> g_stopFlags;
+
+int64_t parseSessionId(const httplib::Request& req, httplib::Response& res) {
+  json b = parseBody(req, res);
+  if (res.status == 400) return 0;
+  int64_t sid = b.value("session_id", (int64_t)0);
+  if (!sid) {
+    res.status = 400;
+    res.set_content(errJson(400, "缺少 session_id").dump(), "application/json; charset=utf-8");
+    return 0;
+  }
+  return sid;
+}
+
+// 核心流式管线：组装上下文 → 调用 provider → SSE 转发 → 落库
+// 注意：内容提供器在 handler 返回后才执行，lambda 必须按值捕获
+void runChat(int64_t sessionId, const std::string& content, bool appendUser,
+             httplib::Response& res) {
+  if (!db::getSession(sessionId)) {
+    res.status = 404;
+    res.set_content(errJson(404, "会话不存在").dump(), "application/json; charset=utf-8");
+    return;
+  }
+  auto persona = db::getActivePersona();
+  if (!persona) {
+    res.status = 500;
+    res.set_content(errJson(500, "没有激活的人设").dump(), "application/json; charset=utf-8");
+    return;
+  }
+  std::string key;
+  std::string keyEnc = db::getSetting("api_key_enc").value_or("");
+  if (!keyEnc.empty()) {
+    try {
+      key = dpapi::unprotect(keyEnc);
+    } catch (const std::exception& e) {
+      logx::error(std::string("dpapi unprotect failed: ") + e.what());
+    }
+  }
+  int keep = 20;
+  try {
+    keep = std::stoi(db::getSetting("keep_rounds").value_or("20"));
+  } catch (...) {
+  }
+  int proxyPort = 0;
+  try {
+    proxyPort = std::stoi(db::getSetting("proxy_port").value_or("0"));
+  } catch (...) {
+  }
+
+  // 先组装上下文再落库，避免 user 消息在 LLM 上下文中重复出现
+  auto history = db::listMessages(sessionId);
+  auto ctx = chat::buildContext(*persona, history, keep, appendUser ? content : "");
+
+  if (appendUser) {
+    auto sess = db::getSession(sessionId);
+    if (sess && sess->title == "新对话") db::renameSession(sessionId, utf8Truncate(content, 20));
+    db::appendMessage(sessionId, "user", content);
+    db::touchSession(sessionId);
+  }
+
+  llm::ChatRequest req;
+  req.messages = ctx;
+  req.temperature = persona->temperature;
+  req.base_url = db::getSetting("base_url").value_or("");
+  req.api_key = key;
+  req.model = db::getSetting("model").value_or("");
+  req.proxy_enabled = db::getSetting("proxy_enabled").value_or("0") == "1";
+  req.proxy_host = db::getSetting("proxy_host").value_or("");
+  req.proxy_port = proxyPort;
+
+  auto stop = std::make_shared<std::atomic_bool>(false);
+  {
+    std::lock_guard<std::mutex> lk(g_stopMtx);
+    g_stopFlags[sessionId] = stop;
+  }
+
+  auto full = std::make_shared<std::string>();
+  auto hadError = std::make_shared<bool>(false);
+  auto errCode = std::make_shared<int>(0);
+  auto errMsg = std::make_shared<std::string>();
+
+  res.set_header("Cache-Control", "no-cache");
+  res.set_chunked_content_provider(
+      "text/event-stream",
+      [req, sessionId, stop, full, hadError, errCode, errMsg](size_t,
+                                                             httplib::DataSink& sink) {
+        try {
+          llm::OpenAiCompatProvider provider;
+          provider.streamChat(
+              req,
+              [&](const llm::StreamEvent& e) {
+                if (!sink.is_writable()) {
+                  stop->store(true);
+                  return;
+                }
+                if (e.type == "delta") {
+                  *full += e.content;
+                  json j = {{"content", e.content}};
+                  std::string sse = "event: delta\ndata: " + j.dump() + "\n\n";
+                  sink.write(sse.data(), sse.size());
+                } else if (e.type == "error") {
+                  *hadError = true;
+                  *errCode = e.error_code;
+                  *errMsg = e.message;
+                  json j = {{"code", e.error_code}, {"message", e.message}};
+                  std::string sse = "event: error\ndata: " + j.dump() + "\n\n";
+                  sink.write(sse.data(), sse.size());
+                }
+              },
+              *stop);
+          {
+            std::lock_guard<std::mutex> lk(g_stopMtx);
+            g_stopFlags.erase(sessionId);
+          }
+          if (!*hadError && !full->empty()) {
+            db::appendMessage(sessionId, "assistant", *full);
+            db::touchSession(sessionId);
+            ev::EventBus::instance().emit(
+                "chat.completed",
+                {{"session_id", sessionId}, {"length", full->size()}});
+          } else if (*hadError) {
+            ev::EventBus::instance().emit(
+                "chat.error", {{"session_id", sessionId},
+                               {"code", *errCode},
+                               {"message", *errMsg}});
+          }
+        } catch (const std::exception& e) {
+          logx::error(std::string("chat stream failed: ") + e.what());
+          if (sink.is_writable()) {
+            json j = {{"code", 500}, {"message", std::string("服务内部错误: ") + e.what()}};
+            std::string sse = "event: error\ndata: " + j.dump() + "\n\n";
+            sink.write(sse.data(), sse.size());
+          }
+        }
+        if (sink.is_writable()) {
+          json done = {{"session_id", sessionId}};
+          std::string sse = "event: done\ndata: " + done.dump() + "\n\n";
+          sink.write(sse.data(), sse.size());
+        }
+        // httplib 0.18 的 chunked provider 会反复调用直到 sink.done()
+        sink.done();
+        return true;
+      });
+}
+
+void registerChatRoutes(httplib::Server& svr) {
+  logx::info("registering chat routes");
+  svr.Post("/api/v1/chat/stream", [](const httplib::Request& req, httplib::Response& res) {
+    json b = parseBody(req, res);
+    if (res.status == 400) return;
+    int64_t sid = b.value("session_id", (int64_t)0);
+    std::string content = b.value("content", "");
+    if (!sid) {
+      res.status = 400;
+      res.set_content(errJson(400, "缺少 session_id").dump(), "application/json; charset=utf-8");
+      return;
+    }
+    if (content.empty()) {
+      res.status = 400;
+      res.set_content(errJson(400, "消息内容为空").dump(), "application/json; charset=utf-8");
+      return;
+    }
+    runChat(sid, content, true, res);
+  });
+
+  svr.Post("/api/v1/chat/regenerate", [](const httplib::Request& req, httplib::Response& res) {
+    int64_t sid = parseSessionId(req, res);
+    if (!sid) return;
+    auto lastU = db::lastMessageByRole(sid, "user");
+    if (!lastU) {
+      res.status = 400;
+      res.set_content(errJson(400, "没有可重新生成的消息").dump(), "application/json; charset=utf-8");
+      return;
+    }
+    auto lastA = db::lastMessageByRole(sid, "assistant");
+    if (lastA) db::deleteMessage(lastA->id);
+    // 历史已以最后一条 user 消息结尾，buildContext 直接复用即可
+    runChat(sid, "", false, res);
+  });
+
+  svr.Post("/api/v1/chat/stop", [](const httplib::Request& req, httplib::Response& res) {
+    int64_t sid = parseSessionId(req, res);
+    if (!sid) return;
+    {
+      std::lock_guard<std::mutex> lk(g_stopMtx);
+      auto it = g_stopFlags.find(sid);
+      if (it != g_stopFlags.end()) it->second->store(true);
+    }
+    res.set_content(okJson(json{{"stopped", true}}).dump(), "application/json; charset=utf-8");
+  });
 }
 
 void registerConfigRoutes(httplib::Server& svr) {
@@ -310,16 +510,30 @@ void registerRoutes(httplib::Server& svr, const std::string& staticDir) {
   registerSessionRoutes(svr);
   registerMessageRoutes(svr);
   registerExportRoute(svr);
+  registerChatRoutes(svr);
 
   svr.set_error_handler([](const httplib::Request&, httplib::Response& res) {
-    // httplib 会对所有 status>=400 的响应调用本处理器；
-    // 仅当业务处理器未写任何内容（即路由未匹配）时补充统一 404 JSON
-    if (res.body.empty()) {
-      res.status = 404;
+    // 仅对"路由未匹配"的默认 404 补充统一 JSON；
+    // 业务 400/500 若未写 body 保持原状态码，避免被错误改写
+    if (res.body.empty() && res.status == 404) {
       res.set_content(errJson(404, "接口不存在").dump(), "application/json; charset=utf-8");
       return httplib::Server::HandlerResponse::Handled;
     }
     return httplib::Server::HandlerResponse::Unhandled;
+  });
+
+  svr.set_exception_handler([](const httplib::Request&, httplib::Response& res,
+                               std::exception_ptr ep) {
+    std::string msg = "未知异常";
+    try {
+      if (ep) std::rethrow_exception(ep);
+    } catch (const std::exception& e) {
+      msg = e.what();
+    } catch (...) {
+    }
+    logx::error(std::string("handler exception: ") + msg);
+    res.status = 500;
+    res.set_content(errJson(500, "服务内部错误").dump(), "application/json; charset=utf-8");
   });
 
   if (!staticDir.empty()) {
