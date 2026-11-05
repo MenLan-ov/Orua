@@ -575,17 +575,20 @@ GroupMessage appendGroupMessage(int64_t groupId, int64_t botId,
   std::lock_guard<std::recursive_mutex> lock(g_mtx);
   std::string ts = nowIso();
   sqlite3_stmt* st = nullptr;
-  sqlite3_prepare_v2(g_db,
+  if (sqlite3_prepare_v2(g_db,
       "INSERT INTO group_messages(group_id, bot_id, role, content, created_at) "
-      "VALUES(?,?,?,?,?)", -1, &st, nullptr);
+      "VALUES(?,?,?,?,?)", -1, &st, nullptr) != SQLITE_OK)
+    throw std::runtime_error("prepare failed: " + std::string(sqlite3_errmsg(g_db)));
   sqlite3_bind_int64(st, 1, groupId);
   if (botId > 0) sqlite3_bind_int64(st, 2, botId);
   else sqlite3_bind_null(st, 2);
   sqlite3_bind_text(st, 3, role.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text(st, 4, content.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text(st, 5, ts.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_step(st);
+  int rc = sqlite3_step(st);
   sqlite3_finalize(st);
+  if (rc != SQLITE_DONE)
+    throw std::runtime_error("step failed: " + std::string(sqlite3_errmsg(g_db)));
   execute("UPDATE groups SET updated_at=? WHERE id=?",
           {ts, std::to_string(groupId)});
   return {sqlite3_last_insert_rowid(g_db), groupId, botId, role, content, ts};
