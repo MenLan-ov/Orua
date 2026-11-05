@@ -27,16 +27,18 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  httplib::Server svr;
   ev::EventBus::instance().loadPlugins(sc.plugins);
-  srv::registerRoutes(svr, sc.static_dir);
 
+  // 端口回退：每个端口用全新 Server 尝试（bind 失败会置 is_decommisioned，复用一个实例会污染后续尝试）
   for (int port = sc.port; port <= sc.port + 10; ++port) {
     logx::info("trying to listen on " + sc.host + ":" + std::to_string(port));
-    if (svr.listen(sc.host, port)) {
+    httplib::Server svr;
+    srv::registerRoutes(svr, sc.static_dir);
+    if (svr.bind_to_port(sc.host, port)) {
       sc.actual_port = port;
       cfg::save(cfgPath, sc);
       logx::info("listening on port " + std::to_string(port));
+      svr.listen_after_bind();
       db::close();
       return 0;
     }
