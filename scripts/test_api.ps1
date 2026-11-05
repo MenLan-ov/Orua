@@ -126,6 +126,13 @@ Invoke-RestMethod "$base/api/v1/groups/$gid" -Method Delete | Out-Null
 $gl = Invoke-RestMethod "$base/api/v1/groups"
 Assert-True (($gl.data | Where-Object id -eq $gid) -eq $null) 'group delete'
 
+# 不存在的群：messages / stream 子资源应 404
+$gm404 = Invoke-ExpectError 'Get' "$base/api/v1/groups/999999999/messages" $null
+Assert-True ($gm404.Status -eq 404) 'messages nonexistent group 404'
+Assert-True ($gm404.Body.message -eq '群不存在') 'messages 404 message'
+$stCode = & curl.exe -s --max-time 5 -o NUL -w '%{http_code}' "$base/api/v1/groups/999999999/stream"
+Assert-True ($stCode -eq '404') 'stream nonexistent group 404'
+
 # 会话绑定机器人 + 切换
 $s = Invoke-Json 'Post' "$base/api/v1/sessions" @{ title = 'E2E测试会话'; bot_id = $botId }
 Assert-True ($s.code -eq 0) 'session create'

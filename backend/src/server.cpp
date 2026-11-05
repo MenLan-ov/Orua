@@ -605,6 +605,10 @@ void registerGroupRoutes(httplib::Server& svr) {
 
   svr.Get(R"(/api/v1/groups/(\d+)/messages)", [](const httplib::Request& req, httplib::Response& res) {
     int64_t id = std::stoll(req.matches[1].str());
+    if (!db::getGroup(id)) {
+      fail(res, 404, 404, "群不存在");
+      return;
+    }
     int limit = req.has_param("limit") ? std::stoi(req.get_param_value("limit")) : 200;
     auto msgs = db::listGroupMessages(id, limit);  // 升序的最后 limit 条
     json arr = json::array();
@@ -669,6 +673,10 @@ void registerGroupRoutes(httplib::Server& svr) {
   // 群流 SSE：多客户端各自订阅，事件经每订阅者独立队列转发
   svr.Get(R"(/api/v1/groups/(\d+)/stream)", [](const httplib::Request& req, httplib::Response& res) {
     int64_t id = std::stoll(req.matches[1].str());
+    if (!db::getGroup(id)) {
+      fail(res, 404, 404, "群不存在");
+      return;
+    }
     auto engine = grp::GroupEngineRegistry::instance().getOrCreate(id, engineStreamFn());
     struct SubState {
       std::mutex mtx;
@@ -684,9 +692,13 @@ void registerGroupRoutes(httplib::Server& svr) {
       st->cv.notify_all();
     });
     // 初始 status：客户端立刻拿到当前状态与轮数
-    st->events.push_back(
-        "event: status\ndata: " +
-        json{{"state", engine->state()}, {"turn", engine->turn()}}.dump() + "\n\n");
+    // （与订阅回调同一把锁保护 deque，避免并发 push_back 数据竞争）
+    {
+      std::lock_guard<std::mutex> lk(st->mtx);
+      st->events.push_back(
+          "event: status\ndata: " +
+          json{{"state", engine->state()}, {"turn", engine->turn()}}.dump() + "\n\n");
+    }
 
     res.set_header("Cache-Control", "no-cache");
     res.set_chunked_content_provider(
