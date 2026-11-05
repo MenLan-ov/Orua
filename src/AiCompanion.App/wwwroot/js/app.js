@@ -1,46 +1,207 @@
+/* Orua v2 — 前端逻辑（三视图 / 机器人 / 群聊 SSE） */
 'use strict';
 
-const API_BASE = window.__API_BASE__ || 'http://127.0.0.1:8765';
+const API_BASE = (window.__API_BASE__ || 'http://127.0.0.1:8765').replace(/\/$/, '');
 
-/* ================= 核心对象：命令注册表 + 事件 + API ================= */
+const $ = (id) => document.getElementById(id);
+const inputEl = $('input');
+const messagesEl = $('messages');
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+let toastTimer = null;
+function toast(msg) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.add('hidden'), 2200);
+}
+
+function setBanner(msg, ok = false) {
+  const el = $('banner');
+  if (!msg) { el.classList.add('hidden'); return; }
+  el.textContent = msg;
+  el.className = 'banner' + (ok ? ' banner-ok' : ' banner-err');
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme || 'dark';
+}
+
+function renderMarkdown(text) {
+  try {
+    const html = marked.parse(text, { breaks: true });
+    return DOMPurify.sanitize(html);
+  } catch (_) {
+    return escapeHtml(text);
+  }
+}
+
+function highlightCode(el) {
+  el.querySelectorAll('pre code').forEach((b) => { try { hljs.highlightElement(b); } catch (_) {} });
+}
+
+function scrollToBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+function scrollGroupToBottom() {
+  const el = $('group-messages');
+  el.scrollTop = el.scrollHeight;
+}
+
+// WebView2 无 window.prompt：自绘弹窗
+function promptText(label, def = '') {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal';
+    overlay.innerHTML = `
+      <div class="modal-box">
+        <h3>${escapeHtml(label)}</h3>
+        <input id="pt-input" value="${escapeHtml(def)}">
+        <div class="modal-actions">
+          <button id="pt-cancel" class="btn-ghost">取消</button>
+          <button id="pt-ok" class="btn-primary">确定</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const input = overlay.querySelector('#pt-input');
+    input.focus(); input.select();
+    const close = (v) => { overlay.remove(); resolve(v); };
+    overlay.querySelector('#pt-ok').onclick = () => close(input.value.trim());
+    overlay.querySelector('#pt-cancel').onclick = () => close(null);
+    input.onkeydown = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); close(input.value.trim()); }
+      if (e.key === 'Escape') close(null);
+    };
+  });
+}
+
+class Typewriter {
+  constructor(el, onDrain) {
+    this.el = el;
+    this.buf = '';
+    this.timer = null;
+    this.onDrain = onDrain;
+  }
+  push(text) { this.buf += text; this.flush(); }
+  flush() {
+    if (this.timer || !this.buf) return;
+    this.timer = setInterval(() => {
+      if (!this.buf) {
+        clearInterval(this.timer);
+        this.timer = null;
+        if (this.onDrain) this.onDrain();
+        return;
+      }
+      this.el.textContent += this.buf.slice(0, 4);
+      this.buf = this.buf.slice(4);
+    }, 24);
+  }
+  finish() {
+    if (this.buf) this.el.textContent += this.buf;
+    this.buf = '';
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    if (this.onDrain) this.onDrain();
+  }
+}
+
+async function consumeSse(url, body, handlers) {
+  const ctrl = new AbortController();
+  App.state.abortCtrl = ctrl;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    if (!res.ok || !res.body) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || `HTTP ${res.status}`);
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const block = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        let ev = 'message', data = '';
+        for (const line of block.split('\n')) {
+          if (line.startsWith('event: ')) ev = line.slice(7).trim();
+          else if (line.startsWith('data: ')) data += line.slice(6);
+        }
+        if (!data) continue;
+        let obj;
+        try { obj = JSON.parse(data); } catch (_) { continue; }
+        if (ev === 'delta') handlers.onDelta && handlers.onDelta(obj.content || '');
+        else if (ev === 'done') handlers.onDone && handlers.onDone(obj);
+        else if (ev === 'error') {
+          const e = new Error(obj.message || '生成失败');
+          e.code = obj.code;
+          handlers.onError && handlers.onError(e);
+        }
+      }
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    handlers.onError && handlers.onError(e);
+  }
+}
+
+/* ================= App 核心 ================= */
 const App = {
   state: {
-    sessions: [],
-    currentSessionId: null,
-    personas: [],
-    activePersonaId: null,
     config: null,
+    sessions: [],
+    bots: [],
+    groups: [],
+    defaultBotId: 0,
+    selectedBotId: null,
+    currentSessionId: null,
+    currentGroupId: null,
+    currentGroup: null,
+    view: 'messages',
     streaming: false,
     abortCtrl: null,
+    search: '',
+    groupAbort: null,
+    groupReconnectTimer: null,
+    groupBackoff: 1000,
+    groupStatus: 'idle',
+    groupTurn: 0,
+    typers: new Map(),
+    gmsgSeen: new Set(),
   },
   commands: new Map(),
-  listeners: {},
-
   registerCommand(name, fn) { this.commands.set(name, fn); },
-  run(name, ...args) {
-    const fn = this.commands.get(name);
-    if (fn) { try { return fn(...args); } catch (e) { console.error('[cmd]', name, e); toast(e.message || String(e)); } }
-    else console.warn('unknown command:', name);
+  run(cmd, ...args) {
+    const fn = this.commands.get(cmd);
+    if (!fn) return Promise.reject(new Error('unknown command: ' + cmd));
+    return Promise.resolve(fn(...args)).catch((e) => {
+      console.error(cmd, e);
+      toast(e.message || '操作失败');
+    });
   },
-  on(type, fn) { (this.listeners[type] ||= []).push(fn); },
-  emit(type, data) { (this.listeners[type] || []).forEach(fn => { try { fn(data); } catch (e) { console.error(e); } }); },
-
   api: {
     async req(method, path, body) {
-      const opts = { method, headers: {} };
-      if (body !== undefined) {
-        opts.headers['Content-Type'] = 'application/json';
-        opts.body = JSON.stringify(body);
-      }
+      const opts = { method, headers: { 'Content-Type': 'application/json' } };
+      if (body !== undefined) opts.body = JSON.stringify(body);
       const res = await fetch(API_BASE + path, opts);
-      if (!res.ok) {
-        let msg = 'HTTP ' + res.status;
-        try { msg = (await res.json()).message || msg; } catch (_) {}
-        throw new Error(msg);
+      let json = null;
+      try { json = await res.json(); } catch (_) {}
+      if (!res.ok || (json && json.code !== 0)) {
+        const e = new Error((json && json.message) || `HTTP ${res.status}`);
+        e.code = json ? json.code : res.status;
+        throw e;
       }
-      const j = await res.json();
-      if (j.code !== 0) throw new Error(j.message || '请求失败');
-      return j.data;
+      return json ? json.data : null;
     },
     get: (p) => App.api.req('GET', p),
     post: (p, b) => App.api.req('POST', p, b),
@@ -49,411 +210,238 @@ const App = {
   },
 };
 
-/* ================= DOM 与工具 ================= */
-const $ = (id) => document.getElementById(id);
-const messagesEl = $('messages');
-const inputEl = $('input');
-const sessionListEl = $('session-list');
-const personaRowEl = $('persona-switcher');
-
-function escapeHtml(s) {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-          .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
-let toastTimer = null;
-function toast(msg) {
-  const t = $('toast');
-  t.textContent = msg;
-  t.classList.remove('hidden');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.add('hidden'), 2600);
-}
-function setBanner(msg) {
-  const b = $('banner');
-  if (!msg) { b.classList.add('hidden'); return; }
-  b.textContent = msg;
-  b.classList.remove('hidden');
-}
-function renderMarkdown(text) {
-  const raw = marked.parse(text, { breaks: true });
-  const clean = DOMPurify.sanitize(raw);
-  const div = document.createElement('div');
-  div.innerHTML = clean;
-  div.querySelectorAll('pre code').forEach(block => {
-    try { hljs.highlightElement(block); } catch (_) {}
-  });
-  return div.innerHTML;
-}
-function applyTheme(theme) {
-  document.documentElement.dataset.theme = theme || 'dark';
-}
-function nearBottom() {
-  return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 90;
-}
-function scrollToBottom(force = false) {
-  if (force || nearBottom()) messagesEl.scrollTop = messagesEl.scrollHeight;
-}
-
-// WebView2 不支持 window.prompt（恒返回 null），提供自绘输入弹窗
-function promptText(title, def = '') {
-  return new Promise((resolve) => {
-    const overlay = document.createElement('div');
-    overlay.className = 'modal';
-    const box = document.createElement('div');
-    box.className = 'modal-box';
-    box.style.width = '360px';
-    const h = document.createElement('h3');
-    h.textContent = title;
-    const input = document.createElement('input');
-    input.value = def;
-    const actions = document.createElement('div');
-    actions.className = 'modal-actions';
-    const ok = document.createElement('button');
-    ok.className = 'btn-primary';
-    ok.textContent = '确定';
-    const cancel = document.createElement('button');
-    cancel.className = 'btn-ghost';
-    cancel.textContent = '取消';
-    actions.append(cancel, ok);
-    box.append(h, input, actions);
-    overlay.appendChild(box);
-    document.body.appendChild(overlay);
-    const close = (val) => { overlay.remove(); resolve(val); };
-    ok.addEventListener('click', () => close(input.value));
-    cancel.addEventListener('click', () => close(null));
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); close(input.value); }
-      if (e.key === 'Escape') close(null);
-    });
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) close(null); });
-    input.focus();
-    input.select();
-  });
-}
-
-/* ================= 打字机 ================= */
-class Typewriter {
-  constructor(el, onDrain) {
-    this.el = el;
-    this.onDrain = onDrain || null;
-    this.buf = '';
-    this.timer = null;
-    this.finished = false;
-    this.drained = false;
-    this.tick = this.tick.bind(this);
-  }
-  push(text) {
-    this.buf += text;
-    if (!this.timer) this.timer = setInterval(this.tick, 24);
-  }
-  tick() {
-    if (!this.buf) {
-      if (this.finished && this.timer) {
-        clearInterval(this.timer);
-        this.timer = null;
-        this.fireDrain();
-      }
-      return;
-    }
-    const n = Math.min(4, this.buf.length);
-    this.el.textContent += this.buf.slice(0, n);
-    this.buf = this.buf.slice(n);
-  }
-  fireDrain() {
-    if (this.drained || !this.onDrain) return;
-    this.drained = true;
-    this.onDrain();
-  }
-  finish() { // 标记完成；缓冲全部排空后回调 onDrain
-    this.finished = true;
-    if (!this.timer) {
-      this.el.textContent += this.buf;
-      this.buf = '';
-      this.fireDrain();
-    }
+/* ================= 视图切换 ================= */
+function switchView(view) {
+  App.state.view = view;
+  $('view-messages').classList.toggle('hidden', view !== 'messages');
+  $('view-bots').classList.toggle('hidden', view !== 'bots');
+  $('view-groups').classList.toggle('hidden', view !== 'groups');
+  $('btn-new-session').classList.toggle('hidden', view !== 'messages');
+  $('btn-new-bot').classList.toggle('hidden', view !== 'bots');
+  $('btn-new-group').classList.toggle('hidden', view !== 'groups');
+  $('session-list').classList.toggle('hidden', view !== 'messages');
+  $('bot-list').classList.toggle('hidden', view !== 'bots');
+  $('group-list').classList.toggle('hidden', view !== 'groups');
+  document.querySelectorAll('.tab-btn').forEach((b) =>
+    b.classList.toggle('active', b.dataset.view === view));
+  if (view === 'groups') {
+    if (App.state.currentGroupId) App.run('open-group-room', App.state.currentGroupId);
+  } else {
+    App.run('close-group-room');
   }
 }
 
-/* ================= 消息气泡 ================= */
-function addBubble(role, text, { streaming = false, id = null } = {}) {
-  const wrap = document.createElement('div');
-  wrap.className = 'msg ' + role;
-  wrap.dataset.msgId = id || '';
+/* ================= 单聊气泡 ================= */
+function metaBar(role, msgId) {
+  let btns = '<button data-action="copy" title="复制">📋</button>';
+  if (role === 'assistant') btns += '<button data-action="regenerate" title="重新生成">🔄</button>';
+  if (msgId) btns += '<button data-action="delete" title="删除">🗑</button>';
+  return `<div class="msg-meta">${btns}</div>`;
+}
 
-  const who = document.createElement('div');
-  who.className = 'who';
-  who.textContent = role === 'user' ? '我' : (App.state.personas.find(p => p.id === App.state.activePersonaId)?.name || 'AI');
+function botNameForSession() {
+  const s = App.state.sessions.find((x) => x.id === App.state.currentSessionId);
+  if (s && s.bot_id > 0) {
+    const b = App.state.bots.find((x) => x.id === s.bot_id);
+    if (b) return b.name;
+  }
+  return 'AI';
+}
 
+function addBubble(role, text, opts = {}) {
   const bubble = document.createElement('div');
-  bubble.className = 'bubble';
-  const content = document.createElement('div');
-  content.className = 'msg-content' + (streaming ? ' typing' : '');
-  if (!streaming) content.innerHTML = renderMarkdown(text);
-  bubble.appendChild(content);
-  wrap.appendChild(who);
-  wrap.appendChild(bubble);
-
-  const meta = document.createElement('div');
-  meta.className = 'msg-meta';
-  meta.innerHTML =
-    '<span class="m-time">' + new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) + '</span>' +
-    '<button class="m-copy" data-action="copy">复制</button>' +
-    (role === 'assistant' && !streaming ? '<button class="m-regen" data-action="regenerate">重新生成</button>' : '') +
-    '<button class="m-del" data-action="delete">删除</button>';
-  wrap.appendChild(meta);
-
-  const empty = messagesEl.querySelector('.empty-tip');
-  if (empty) empty.remove();
-  messagesEl.appendChild(wrap);
-  scrollToBottom(true);
+  bubble.className = 'msg ' + (role === 'user' ? 'msg-user' : 'msg-ai');
+  if (opts.id) bubble.dataset.msgId = opts.id;
+  const who = role === 'user' ? '我' : botNameForSession();
+  bubble.innerHTML = `
+    <div class="msg-who">${escapeHtml(who)}</div>
+    <div class="msg-content">${opts.streaming ? '' : renderMarkdown(text)}</div>
+    ${opts.streaming ? '' : metaBar(role, opts.id)}`;
+  messagesEl.appendChild(bubble);
+  const contentEl = bubble.querySelector('.msg-content');
+  if (!opts.streaming) highlightCode(contentEl);
   return {
-    root: wrap,
-    contentEl: content,
-    finalize(fullText) {
-      content.classList.remove('typing');
-      content.innerHTML = renderMarkdown(fullText);
-      const regen = document.createElement('button');
-      regen.className = 'm-regen';
-      regen.dataset.action = 'regenerate';
-      regen.textContent = '重新生成';
-      meta.insertBefore(regen, meta.querySelector('.m-del'));
+    el: bubble,
+    contentEl,
+    finalize(full) {
+      contentEl.innerHTML = renderMarkdown(full);
+      highlightCode(contentEl);
+      if (!bubble.querySelector('.msg-meta')) bubble.insertAdjacentHTML('beforeend', metaBar(role));
+      scrollToBottom();
     },
     showError(msg) {
-      content.classList.remove('typing');
-      const note = document.createElement('div');
-      note.className = 'err-note';
-      note.textContent = '⚠ ' + msg;
-      wrap.appendChild(note);
+      contentEl.innerHTML = `<span class="msg-error">⚠ ${escapeHtml(msg)}</span>`;
     },
   };
 }
 
-/* ================= SSE 消费 ================= */
-async function consumeSse(path, payload, { onDelta, onDone, onError }) {
-  App.state.abortCtrl = new AbortController();
-  let res;
-  try {
-    res = await fetch(API_BASE + path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: App.state.abortCtrl.signal,
-    });
-  } catch (e) {
-    if (e.name === 'AbortError') return;
-    throw new Error('无法连接后端服务');
-  }
-  if (!res.ok || !res.body) {
-    let msg = 'HTTP ' + res.status;
-    try { msg = (await res.json()).message || msg; } catch (_) {}
-    throw new Error(msg);
-  }
-  const reader = res.body.getReader();
-  const dec = new TextDecoder();
-  let buf = '';
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let idx;
-    while ((idx = buf.indexOf('\n\n')) >= 0) {
-      const block = buf.slice(0, idx);
-      buf = buf.slice(idx + 2);
-      let ev = 'message', data = '';
-      for (const line of block.split('\n')) {
-        const t = line.replace(/\r$/, '');
-        if (t.startsWith('event:')) ev = t.slice(6).trim();
-        else if (t.startsWith('data:')) data += (data ? '\n' : '') + t.slice(5).trim();
-      }
-      if (!data) continue;
-      let j;
-      try { j = JSON.parse(data); } catch (_) { continue; }
-      if (ev === 'delta') onDelta(j.content || '');
-      else if (ev === 'done') onDone(j);
-      else if (ev === 'error') onError(j);
-    }
-  }
+function setStreamingUI(streaming) {
+  App.state.streaming = streaming;
+  $('btn-send').classList.toggle('hidden', streaming);
+  $('btn-stop').classList.toggle('hidden', !streaming);
+  $('stream-hint').classList.toggle('hidden', !streaming);
 }
 
-function setStreamingUI(on) {
-  App.state.streaming = on;
-  $('btn-send').classList.toggle('hidden', on);
-  $('btn-stop').classList.toggle('hidden', !on);
-  $('stream-hint').classList.toggle('hidden', !on);
-}
-
-/* ================= 会话管理 ================= */
-async function refreshSessions(silent = false) {
+/* ================= 会话 ================= */
+async function refreshSessions() {
   App.state.sessions = await App.api.get('/api/v1/sessions');
-  if (!App.state.sessions.length) App.state.currentSessionId = null;
-  else if (!App.state.sessions.some(s => s.id === App.state.currentSessionId))
-    App.state.currentSessionId = App.state.sessions[0].id;
   renderSessions();
-  if (!silent && App.state.currentSessionId) loadMessages(App.state.currentSessionId);
 }
 
 function renderSessions() {
-  sessionListEl.innerHTML = '';
-  if (!App.state.sessions.length) {
-    sessionListEl.innerHTML = '<div class="empty-tip">还没有会话<br>点击"＋ 新对话"开始</div>';
-    return;
-  }
-  for (const s of App.state.sessions) {
+  const el = $('session-list');
+  const q = App.state.search.trim().toLowerCase();
+  const list = App.state.sessions.filter((s) => !q || s.title.toLowerCase().includes(q));
+  el.innerHTML = '';
+  for (const s of list) {
     const item = document.createElement('div');
-    item.className = 'session-item' + (s.id === App.state.currentSessionId ? ' active' : '');
-    item.innerHTML =
-      '<span class="s-title"></span>' +
-      '<span class="s-actions">' +
-      '<button data-sact="rename" title="重命名">✎</button>' +
-      '<button class="s-del" data-sact="delete" title="删除">✕</button>' +
-      '</span>';
-    item.querySelector('.s-title').textContent = s.title;
-    item.addEventListener('click', (e) => {
-      if (e.target.closest('.s-actions')) return;
-      App.run('select-session', s.id);
-    });
-    item.querySelector('[data-sact="rename"]').addEventListener('click', () => App.run('rename-session', s.id));
-    item.querySelector('[data-sact="delete"]').addEventListener('click', () => App.run('delete-session', s.id));
-    sessionListEl.appendChild(item);
+    item.className = 'list-item' + (s.id === App.state.currentSessionId ? ' active' : '');
+    item.innerHTML = `<div class="list-item-title">${escapeHtml(s.title)}</div>`;
+    item.onclick = () => App.run('select-session', s.id);
+    item.ondblclick = () => App.run('rename-session', s.id);
+    const del = document.createElement('button');
+    del.className = 'list-item-btn';
+    del.textContent = '🗑';
+    del.title = '删除会话';
+    del.onclick = (e) => { e.stopPropagation(); App.run('delete-session', s.id); };
+    item.appendChild(del);
+    el.appendChild(item);
   }
-  $('chat-title').textContent =
-    App.state.sessions.find(s => s.id === App.state.currentSessionId)?.title || '新对话';
 }
 
-async function loadMessages(sessionId) {
-  const msgs = await App.api.get(`/api/v1/messages?session_id=${sessionId}&limit=200`);
+function updateChatSub(sid) {
+  const s = App.state.sessions.find((x) => x.id === sid);
+  if (!s) { $('chat-sub').textContent = ''; return; }
+  if (s.bot_id > 0) {
+    const b = App.state.bots.find((x) => x.id === s.bot_id);
+    $('chat-sub').textContent = b ? `与 ${b.name} 对话` : '与默认机器人对话';
+  } else {
+    $('chat-sub').textContent = '与默认机器人对话';
+  }
+}
+
+async function loadMessages(sid) {
+  const msgs = await App.api.get(`/api/v1/messages?session_id=${sid}&limit=100`);
   messagesEl.innerHTML = '';
-  if (!msgs.length) {
-    messagesEl.innerHTML = '<div class="empty-tip">开始新的对话吧 ✦</div>';
-    return;
+  for (const m of [...msgs].reverse()) {
+    if (m.role === 'user') addBubble('user', m.content, { id: m.id });
+    else if (m.role === 'assistant') addBubble('assistant', m.content, { id: m.id });
+    else {
+      const note = document.createElement('div');
+      note.className = 'sysnote';
+      note.textContent = m.content;
+      messagesEl.appendChild(note);
+    }
   }
-  // 后端按倒序返回（新在前），渲染时翻转为旧→新
-  for (const m of [...msgs].reverse()) addBubble(m.role, m.content, { id: m.id });
-  scrollToBottom(true);
+  scrollToBottom();
 }
-
-/* ================= 人设 ================= */
-async function refreshPersonas() {
-  App.state.personas = await App.api.get('/api/v1/personas');
-  App.state.activePersonaId = App.state.personas.find(p => p.is_active)?.id || null;
-  renderPersonas();
-}
-function renderPersonas() {
-  personaRowEl.innerHTML = '';
-  for (const p of App.state.personas) {
-    const chip = document.createElement('button');
-    chip.className = 'persona-chip' + (p.id === App.state.activePersonaId ? ' active' : '');
-    chip.innerHTML =
-      '<span>' + escapeHtml(p.avatar) + '</span><span>' + escapeHtml(p.name) + '</span>' +
-      '<span class="chip-edit" data-pact="edit">✎</span>' +
-      (p.id === App.state.activePersonaId ? '' : '<span class="chip-edit" data-pact="del">✕</span>');
-    chip.addEventListener('click', (e) => {
-      if (e.target.closest('[data-pact="edit"]')) { App.run('open-persona-editor', p); return; }
-      if (e.target.closest('[data-pact="del"]')) { App.run('delete-persona', p.id); return; }
-      App.run('activate-persona', p.id);
-    });
-    personaRowEl.appendChild(chip);
-  }
-  const add = document.createElement('button');
-  add.className = 'persona-chip';
-  add.textContent = '＋ 新人设';
-  add.addEventListener('click', () => App.run('open-persona-editor', null));
-  personaRowEl.appendChild(add);
-}
-
-/* ================= 命令实现 ================= */
-App.registerCommand('boot', async () => {
-  try {
-    App.state.config = await App.api.get('/api/v1/config');
-  } catch (_) {
-    App.state.config = { theme: 'dark' };
-    setBanner('后端服务未连接，请重新打开程序');
-    return;
-  }
-  applyTheme(App.state.config.theme);
-  await Promise.all([refreshPersonas(), refreshSessions()]);
-  const last = localStorage.getItem('last_session');
-  if (last && App.state.sessions.some(s => String(s.id) === last)) {
-    App.state.currentSessionId = Number(last);
-    renderSessions();
-    loadMessages(App.state.currentSessionId);
-  }
-});
-
-App.registerCommand('backend-status', (payload) => {
-  if (payload.status === 'down') setBanner('后端连接中断：' + (payload.detail || '正在重试…'));
-  else setBanner('');
-});
-
-App.registerCommand('new-session', async () => {
-  const s = await App.api.post('/api/v1/sessions', {});
-  App.state.currentSessionId = s.id;
-  localStorage.setItem('last_session', String(s.id));
-  await refreshSessions();
-  loadMessages(s.id);
-});
 
 App.registerCommand('select-session', async (id) => {
   App.state.currentSessionId = id;
-  localStorage.setItem('last_session', String(id));
   renderSessions();
+  const s = App.state.sessions.find((x) => x.id === id);
+  $('chat-title').textContent = s ? s.title : '新对话';
+  updateChatSub(id);
   await loadMessages(id);
+  $('chat-empty').classList.add('hidden');
+  $('messages').classList.remove('hidden');
+  $('composer').classList.remove('hidden');
+  $('btn-switch-bot').classList.remove('hidden');
 });
 
 App.registerCommand('rename-session', async (id) => {
-  const cur = App.state.sessions.find(s => s.id === id);
-  const title = await promptText('会话名称', cur?.title || '');
-  if (title === null || !title.trim()) return;
-  await App.api.patch(`/api/v1/sessions/${id}`, { title: title.trim() });
+  const s = App.state.sessions.find((x) => x.id === id);
+  if (!s) return;
+  const title = await promptText('重命名会话', s.title);
+  if (!title) return;
+  await App.api.patch(`/api/v1/sessions/${id}`, { title });
   await refreshSessions();
+  if (App.state.currentSessionId === id) $('chat-title').textContent = title;
 });
 
 App.registerCommand('delete-session', async (id) => {
-  if (!confirm('删除该会话及其全部消息？')) return;
+  if (!confirm('删除这个会话及其全部消息？')) return;
   await App.api.del(`/api/v1/sessions/${id}`);
+  if (App.state.currentSessionId === id) {
+    App.state.currentSessionId = null;
+    messagesEl.innerHTML = '';
+    $('chat-title').textContent = '新对话';
+    $('chat-sub').textContent = '';
+    $('messages').classList.add('hidden');
+    $('composer').classList.add('hidden');
+    $('chat-empty').classList.remove('hidden');
+  }
   await refreshSessions();
-  if (App.state.currentSessionId) loadMessages(App.state.currentSessionId);
-  else { messagesEl.innerHTML = '<div class="empty-tip">开始新的对话吧 ✦</div>'; }
 });
 
-App.registerCommand('send-message', async () => {
-  if (App.state.streaming) return;
-  const text = inputEl.value.trim();
-  if (!text) return;
-  const sid = App.state.currentSessionId;
-  if (!sid) { toast('请先创建会话'); return; }
-  if (!App.state.config || !App.state.config.model || !App.state.config.base_url) {
-    toast('请先在设置中填写 API 配置');
-    App.run('open-settings');
-    return;
+App.registerCommand('new-session', () => {
+  const box = $('ns-bots');
+  box.innerHTML = '';
+  const enabled = App.state.bots.filter((b) => b.is_enabled);
+  if (!enabled.length) { toast('没有可用的机器人，请先在「机器人」页创建或启用'); return; }
+  for (const b of enabled) {
+    const label = document.createElement('label');
+    label.className = 'ns-bot' + (b.id === App.state.defaultBotId ? ' checked' : '');
+    label.innerHTML = `<input type="radio" name="ns-bot" value="${b.id}" ${b.id === App.state.defaultBotId ? 'checked' : ''}>
+      <span class="member-avatar">${escapeHtml(b.avatar)}</span>
+      <span class="member-name">${escapeHtml(b.name)}</span>`;
+    box.appendChild(label);
   }
+  $('modal-new-session').dataset.mode = 'create';
+  $('modal-new-session').classList.remove('hidden');
+});
+
+App.registerCommand('switch-session-bot', () => {
+  if (!App.state.currentSessionId) return;
+  App.run('new-session');
+  $('modal-new-session').dataset.mode = 'switch';
+});
+
+App.registerCommand('save-new-session', async () => {
+  const checked = $('ns-bots').querySelector('input:checked');
+  if (!checked) { toast('请选择一个机器人'); return; }
+  const botId = Number(checked.value);
+  const mode = $('modal-new-session').dataset.mode;
+  $('modal-new-session').classList.add('hidden');
+  if (mode === 'switch') {
+    const sid = App.state.currentSessionId;
+    if (!sid) return;
+    await App.api.patch(`/api/v1/sessions/${sid}`, { bot_id: botId });
+    updateChatSub(sid);
+    toast('已切换机器人');
+  } else {
+    const s = await App.api.post('/api/v1/sessions', { bot_id: botId });
+    await refreshSessions();
+    App.run('select-session', s.id);
+  }
+});
+
+/* ================= 单聊交互 ================= */
+App.registerCommand('send-message', async () => {
+  const sid = App.state.currentSessionId;
+  const content = inputEl.value.trim();
+  if (!sid || !content || App.state.streaming) return;
   inputEl.value = '';
-  addBubble('user', text);
   setStreamingUI(true);
+  addBubble('user', content);
+  scrollToBottom();
   const bubble = addBubble('assistant', '', { streaming: true });
   let full = '';
-  const tw = new Typewriter(bubble.contentEl, () => { bubble.finalize(full); scrollToBottom(); });
-  let errored = false;
+  const tw = new Typewriter(bubble.contentEl, () => { bubble.finalize(full); });
   try {
-    await consumeSse('/api/v1/chat/stream', { session_id: sid, content: text }, {
+    await consumeSse('/api/v1/chat/stream', { session_id: sid, content }, {
       onDelta: (d) => { full += d; tw.push(d); scrollToBottom(); },
-      onDone: () => {
-        tw.finish();
-        App.run('refresh-after-chat');
-      },
+      onDone: () => { tw.finish(); App.run('refresh-after-chat'); },
       onError: (e) => {
-        errored = true;
         tw.finish();
         bubble.showError(e.message || '生成失败');
         App.run('refresh-after-chat');
       },
     });
   } catch (e) {
-    if (!errored) {
-      tw.finish();
-      bubble.showError(e.message);
-      App.run('refresh-after-chat');
-    }
+    tw.finish();
+    bubble.showError(e.message);
+    App.run('refresh-after-chat');
   }
 });
 
@@ -478,7 +466,7 @@ App.registerCommand('regenerate', async () => {
   setStreamingUI(true);
   const bubble = addBubble('assistant', '', { streaming: true });
   let full = '';
-  const tw = new Typewriter(bubble.contentEl, () => { bubble.finalize(full); scrollToBottom(); });
+  const tw = new Typewriter(bubble.contentEl, () => { bubble.finalize(full); });
   try {
     await consumeSse('/api/v1/chat/regenerate', { session_id: sid }, {
       onDelta: (d) => { full += d; tw.push(d); scrollToBottom(); },
@@ -492,15 +480,13 @@ App.registerCommand('regenerate', async () => {
   }
 });
 
-App.registerCommand('copy-message', async (msgId) => {
-  const el = messagesEl.querySelector(`.msg[data-msg-id="${msgId}"] .msg-content`);
-  if (!el) return;
+App.registerCommand('copy-message', async (msgEl) => {
+  const content = msgEl.querySelector('.msg-content');
+  if (!content) return;
   try {
-    await navigator.clipboard.writeText(el.innerText);
+    await navigator.clipboard.writeText(content.innerText);
     toast('已复制');
-  } catch (_) {
-    toast('复制失败');
-  }
+  } catch (_) { toast('复制失败'); }
 });
 
 App.registerCommand('delete-message', async (msgId) => {
@@ -515,7 +501,7 @@ App.registerCommand('clear-session', async () => {
   if (!sid) return;
   if (!confirm('清空当前会话的全部消息？')) return;
   await App.api.del(`/api/v1/messages?session_id=${sid}`);
-  messagesEl.innerHTML = '<div class="empty-tip">开始新的对话吧 ✦</div>';
+  messagesEl.innerHTML = '<div class="sysnote">开始新的对话吧 ✦</div>';
 });
 
 App.registerCommand('export-session', async () => {
@@ -533,55 +519,493 @@ App.registerCommand('export-session', async () => {
   URL.revokeObjectURL(a.href);
 });
 
-App.registerCommand('activate-persona', async (id) => {
-  const sid = App.state.currentSessionId;
-  const q = sid ? `?session_id=${sid}` : '';
-  await App.api.post(`/api/v1/personas/${id}/activate${q}`);
-  await refreshPersonas();
-  if (sid) loadMessages(sid);
+/* ================= 机器人 ================= */
+async function refreshBots() {
+  const data = await App.api.get('/api/v1/bots');
+  App.state.bots = data.bots;
+  App.state.defaultBotId = data.default_bot_id;
+  renderBots();
+}
+
+function renderBots() {
+  const el = $('bot-list');
+  const q = App.state.search.trim().toLowerCase();
+  const list = App.state.bots.filter((b) => !q || b.name.toLowerCase().includes(q));
+  el.innerHTML = '';
+  $('bots-empty').classList.toggle('hidden', list.length > 0);
+  for (const b of list) {
+    const item = document.createElement('div');
+    item.className = 'list-item' + (b.id === App.state.selectedBotId ? ' active' : '');
+    item.innerHTML = `
+      <div class="list-item-avatar">${escapeHtml(b.avatar)}</div>
+      <div class="list-item-body">
+        <div class="list-item-title">${escapeHtml(b.name)}${b.id === App.state.defaultBotId ? '<span class="tag">默认</span>' : ''}</div>
+        <div class="list-item-sub">${b.is_enabled ? '' : '已停用 · '}${escapeHtml(b.api_base_url || '默认 API')}</div>
+      </div>
+      <label class="switch" title="启用/停用">
+        <input type="checkbox" data-bot-toggle="${b.id}" ${b.is_enabled ? 'checked' : ''}>
+        <span class="slider"></span>
+      </label>`;
+    item.onclick = (e) => {
+      if (e.target.closest('.switch')) return;
+      App.run('select-bot', b.id);
+    };
+    el.appendChild(item);
+  }
+  renderBotDetail();
+}
+
+App.registerCommand('select-bot', (id) => {
+  App.state.selectedBotId = id;
+  renderBots();
 });
 
-App.registerCommand('open-persona-editor', (p) => {
-  $('persona-modal-title').textContent = p ? '编辑人设' : '新建人设';
-  $('pe-name').value = p?.name || '';
-  $('pe-avatar').value = p?.avatar || '🌸';
-  $('pe-greeting').value = p?.greeting || '';
-  $('pe-prompt').value = p?.system_prompt || '';
-  $('pe-temp').value = p?.temperature ?? 0.8;
-  $('modal-persona').classList.remove('hidden');
-  $('modal-persona').dataset.personaId = p?.id || '';
+function renderBotDetail() {
+  const b = App.state.bots.find((x) => x.id === App.state.selectedBotId);
+  const detail = $('bot-detail');
+  if (!b) { detail.classList.add('hidden'); return; }
+  detail.classList.remove('hidden');
+  $('bot-detail-avatar').textContent = b.avatar;
+  $('bot-detail-name').textContent = b.name + (b.id === App.state.defaultBotId ? '（默认）' : '');
+  $('bot-detail-sub').textContent = b.is_enabled ? '已启用' : '已停用';
+  $('bot-detail-prompt').textContent = b.system_prompt;
+  $('bot-detail-meta').innerHTML =
+    `Temperature：${b.temperature}<br>` +
+    `API：${escapeHtml(b.api_base_url || '继承默认配置')} · 模型：${escapeHtml(b.api_model || '继承默认配置')}<br>` +
+    `Key：${b.api_key ? escapeHtml(b.api_key) : '继承默认配置'}`;
+  $('bot-detail-greeting').textContent = b.greeting || '（无）';
+}
+
+App.registerCommand('open-bot-editor', (b) => {
+  $('bot-modal-title').textContent = b ? '编辑机器人' : '新建机器人';
+  $('be-name').value = b?.name || '';
+  $('be-avatar').value = b?.avatar || '🤖';
+  $('be-greeting').value = b?.greeting || '';
+  $('be-prompt').value = b?.system_prompt || '';
+  $('be-temp').value = b?.temperature ?? 0.8;
+  $('be-api-base').value = b?.api_base_url || '';
+  $('be-api-key').value = '';
+  $('be-api-key').placeholder = b?.api_key ? `当前 Key：${b.api_key}（留空保持不变）` : '留空 = 使用默认 Key';
+  $('be-api-model').value = b?.api_model || '';
+  $('be-key-clear').checked = false;
+  $('modal-bot').dataset.botId = b?.id || '';
+  $('modal-bot').classList.remove('hidden');
 });
 
-App.registerCommand('save-persona', async () => {
-  const name = $('pe-name').value.trim();
-  const promptText = $('pe-prompt').value.trim();
-  if (!name || !promptText) { toast('名称与 System Prompt 不能为空'); return; }
+App.registerCommand('save-bot', async () => {
+  const name = $('be-name').value.trim();
+  const prompt = $('be-prompt').value.trim();
+  if (!name || !prompt) { toast('名称与 System Prompt 不能为空'); return; }
   const body = {
     name,
-    avatar: $('pe-avatar').value.trim() || '🌸',
-    greeting: $('pe-greeting').value.trim(),
-    system_prompt: promptText,
-    temperature: Number($('pe-temp').value) || 0.8,
+    avatar: $('be-avatar').value.trim() || '🤖',
+    greeting: $('be-greeting').value.trim(),
+    system_prompt: prompt,
+    temperature: Number($('be-temp').value) || 0.8,
+    api_base_url: $('be-api-base').value.trim(),
+    api_model: $('be-api-model').value.trim(),
   };
-  const id = $('modal-persona').dataset.personaId;
-  if (id) body.id = Number(id);
-  await App.api.post('/api/v1/personas', body);
-  $('modal-persona').classList.add('hidden');
-  await refreshPersonas();
-  toast('人设已保存');
+  if ($('be-key-clear').checked) body.api_key = '';
+  else if ($('be-api-key').value.trim()) body.api_key = $('be-api-key').value.trim();
+  const id = $('modal-bot').dataset.botId;
+  if (id) await App.api.patch(`/api/v1/bots/${id}`, body);
+  else await App.api.post('/api/v1/bots', body);
+  $('modal-bot').classList.add('hidden');
+  await refreshBots();
+  toast('机器人已保存');
 });
 
-App.registerCommand('delete-persona', async (id) => {
-  if (!confirm('删除这个人设？')) return;
+App.registerCommand('delete-bot', async (id) => {
+  const b = App.state.bots.find((x) => x.id === id);
+  if (!confirm(`删除机器人「${b?.name || ''}」？`)) return;
   try {
-    await App.api.del(`/api/v1/personas/${id}`);
+    await App.api.del(`/api/v1/bots/${id}`);
   } catch (e) {
+    toast(e.code === 1001 ? '默认机器人不可删除' : e.message);
+    return;
+  }
+  await refreshBots();
+});
+
+/* ================= 群聊 ================= */
+async function refreshGroups() {
+  App.state.groups = await App.api.get('/api/v1/groups');
+  renderGroups();
+}
+
+function renderGroups() {
+  const el = $('group-list');
+  const q = App.state.search.trim().toLowerCase();
+  const list = App.state.groups.filter((g) => !q || g.name.toLowerCase().includes(q));
+  el.innerHTML = '';
+  $('group-empty').classList.toggle('hidden', list.length > 0 || !!App.state.currentGroupId);
+  for (const g of list) {
+    const item = document.createElement('div');
+    item.className = 'list-item' + (g.id === App.state.currentGroupId ? ' active' : '');
+    const statusLabel = { running: '进行中', paused: '已暂停' }[g.status];
+    item.innerHTML = `<div class="list-item-body">
+        <div class="list-item-title">${escapeHtml(g.name)}</div>
+        <div class="list-item-sub">${g.member_count} 位成员${statusLabel ? ' · ' + statusLabel : ''}</div>
+      </div>`;
+    item.onclick = () => App.run('select-group', g.id);
+    const del = document.createElement('button');
+    del.className = 'list-item-btn';
+    del.textContent = '🗑';
+    del.title = '删除群';
+    del.onclick = (e) => { e.stopPropagation(); App.run('delete-group', g.id); };
+    item.appendChild(del);
+    el.appendChild(item);
+  }
+}
+
+App.registerCommand('select-group', (id) => {
+  App.run('open-group-room', id);
+});
+
+function addGroupBubble(botId, name, avatar, text, opts = {}) {
+  const el = $('group-messages');
+  const bubble = document.createElement('div');
+  bubble.className = 'gmsg' + (botId === 0 ? ' gmsg-user' : '');
+  if (opts.id) bubble.dataset.gmsgId = opts.id;
+  bubble.innerHTML = `
+    <div class="gmsg-head">
+      <span class="gmsg-avatar">${escapeHtml(avatar)}</span>
+      <span class="gmsg-name">${escapeHtml(name)}</span>
+      ${opts.id && !opts.streaming ? '<div class="gmsg-meta"><button data-action="copy" title="复制">📋</button></div>' : ''}
+    </div>
+    <div class="gmsg-content">${opts.streaming ? '' : renderMarkdown(text)}</div>`;
+  el.appendChild(bubble);
+  const contentEl = bubble.querySelector('.gmsg-content');
+  if (!opts.streaming) highlightCode(contentEl);
+  return {
+    el: bubble,
+    contentEl,
+    finalize(full) {
+      contentEl.innerHTML = renderMarkdown(full);
+      highlightCode(contentEl);
+      scrollGroupToBottom();
+    },
+    showError(msg) {
+      contentEl.innerHTML = `<span class="msg-error">⚠ ${escapeHtml(msg)}</span>`;
+    },
+  };
+}
+
+// 按 gmsg id 去重（SSE 与 REST 重建可能重复投递同一条）
+function addGroupBubbleChecked(botId, name, avatar, text, opts = {}) {
+  if (opts.id && App.state.gmsgSeen.has(opts.id)) return null;
+  if (opts.id) App.state.gmsgSeen.add(opts.id);
+  return addGroupBubble(botId, name, avatar, text, opts);
+}
+
+function addGroupNote(text) {
+  const note = document.createElement('div');
+  note.className = 'sysnote';
+  note.textContent = text;
+  $('group-messages').appendChild(note);
+  scrollGroupToBottom();
+}
+
+App.registerCommand('open-group-room', async (gid) => {
+  closeGroupStream();
+  App.state.typers.clear();
+  App.state.gmsgSeen.clear();
+  App.state.currentGroupId = gid;
+  App.state.groupStatus = 'idle';
+  App.state.groupTurn = 0;
+  App.state.groupBackoff = 1000;
+  let g;
+  try {
+    g = await App.api.get(`/api/v1/groups/${gid}`);
+  } catch (e) {
+    App.state.currentGroupId = null;
     toast(e.message);
     return;
   }
-  await refreshPersonas();
+  App.state.currentGroup = g;
+  $('group-empty').classList.add('hidden');
+  $('group-room').classList.remove('hidden');
+  $('group-title').textContent = g.name;
+  $('group-sub').textContent = g.topic ? `话题：${g.topic}` : '';
+  $('group-topic').value = '';
+  App.state.groupStatus = g.status;
+  App.state.groupTurn = 0;
+  updateGroupControls();
+  await reconcileGroupMessages();
+  openGroupStream(gid);
 });
 
+App.registerCommand('close-group-room', () => {
+  if (App.state.currentGroupId === null) return;
+  closeGroupStream();
+  App.state.typers.clear();
+  App.state.currentGroupId = null;
+  App.state.currentGroup = null;
+  $('group-room').classList.add('hidden');
+  $('group-empty').classList.remove('hidden');
+  renderGroups();
+});
+
+function closeGroupStream() {
+  try { App.state.groupAbort?.abort(); } catch (_) {}
+  App.state.groupAbort = null;
+  clearTimeout(App.state.groupReconnectTimer);
+  App.state.groupReconnectTimer = null;
+}
+
+// 以 REST 为准全量重建消息区（turn_end 时引擎已落库，此时无在途打字机）
+async function reconcileGroupMessages() {
+  const gid = App.state.currentGroupId;
+  if (!gid) return;
+  try {
+    const msgs = await App.api.get(`/api/v1/groups/${gid}/messages?limit=200`);
+    const el = $('group-messages');
+    el.innerHTML = '';
+    for (const m of [...msgs].reverse()) {
+      addGroupBubbleChecked(m.bot_id, m.name, m.avatar, m.content, { id: m.id });
+    }
+    scrollGroupToBottom();
+  } catch (_) {}
+}
+
+function updateGroupControls() {
+  const st = App.state.groupStatus;
+  $('btn-group-start').classList.toggle('hidden', st !== 'idle');
+  $('btn-group-pause').classList.toggle('hidden', st !== 'running');
+  $('btn-group-resume').classList.toggle('hidden', st !== 'paused');
+  $('btn-group-stop').classList.toggle('hidden', st === 'idle');
+  $('group-turn').classList.toggle('hidden', st === 'idle');
+  if (st !== 'idle') $('group-turn').textContent = `第 ${App.state.groupTurn} 轮`;
+}
+
+function ensureTyper(obj) {
+  const key = obj.bot_id;
+  let t = App.state.typers.get(key);
+  if (!t) {
+    const b = addGroupBubble(key, obj.name || '机器人', obj.avatar || '🤖', '', { streaming: true });
+    const tw = new Typewriter(b.contentEl, () => {});
+    t = { bubble: b, tw, full: '' };
+    App.state.typers.set(key, t);
+  }
+  return t;
+}
+
+function finishTyper(botId) {
+  const t = App.state.typers.get(botId);
+  if (!t) return;
+  App.state.typers.delete(botId);
+  t.tw.finish();
+  t.bubble.finalize(t.full);
+  reconcileGroupMessages();
+}
+
+function handleGroupEvent(ev, obj) {
+  if (ev === 'status') {
+    const prev = App.state.groupStatus;
+    App.state.groupStatus = obj.state;
+    App.state.groupTurn = obj.turn || App.state.groupTurn;
+    updateGroupControls();
+    if (obj.state === 'idle' && prev !== 'idle') addGroupNote('群聊已停止');
+  } else if (ev === 'turn_start') {
+    ensureTyper(obj);
+  } else if (ev === 'delta') {
+    const t = ensureTyper(obj);
+    t.full += obj.text || '';
+    t.tw.push(obj.text || '');
+    scrollGroupToBottom();
+  } else if (ev === 'turn_end') {
+    finishTyper(obj.bot_id);
+  } else if (ev === 'interject') {
+    addGroupBubbleChecked(0, '用户', '🙋', obj.content, { id: obj.id });
+    scrollGroupToBottom();
+  } else if (ev === 'error') {
+    finishTyper(obj.bot_id);
+    addGroupNote(`⚠ ${obj.name || '机器人'} 回复失败：${obj.message || ''}`);
+  }
+}
+
+async function openGroupStream(gid) {
+  closeGroupStream();
+  const ctrl = new AbortController();
+  App.state.groupAbort = ctrl;
+  try {
+    const res = await fetch(`${API_BASE}/api/v1/groups/${gid}/stream`, { signal: ctrl.signal });
+    if (!res.ok || !res.body) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || `HTTP ${res.status}`);
+    }
+    App.state.groupBackoff = 1000;
+    setBanner('');
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const block = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        let ev = 'message', data = '';
+        for (const line of block.split('\n')) {
+          if (line.startsWith('event: ')) ev = line.slice(7).trim();
+          else if (line.startsWith('data: ')) data += line.slice(6);
+        }
+        if (!data) continue;
+        let obj;
+        try { obj = JSON.parse(data); } catch (_) { continue; }
+        handleGroupEvent(ev, obj);
+      }
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+  }
+  scheduleGroupReconnect(gid);
+}
+
+// 断开退避重连：1s/2s/4s（封顶）
+function scheduleGroupReconnect(gid) {
+  if (App.state.currentGroupId !== gid) return;
+  const delay = App.state.groupBackoff;
+  App.state.groupBackoff = Math.min(App.state.groupBackoff * 2, 4000);
+  setBanner(`群聊连接断开，${Math.round(delay / 1000)}s 后重连…`);
+  clearTimeout(App.state.groupReconnectTimer);
+  App.state.groupReconnectTimer = setTimeout(() => {
+    if (App.state.currentGroupId === gid) openGroupStream(gid);
+  }, delay);
+}
+
+App.registerCommand('group-start', async () => {
+  const gid = App.state.currentGroupId;
+  if (!gid) return;
+  const topic = $('group-topic').value.trim();
+  try {
+    const r = await App.api.post(`/api/v1/groups/${gid}/start`, topic ? { topic } : {});
+    App.state.groupStatus = r.state;
+    updateGroupControls();
+    if (topic) {
+      App.state.currentGroup.topic = topic;
+      $('group-sub').textContent = `话题：${topic}`;
+      $('group-topic').value = '';
+    }
+  } catch (e) { toast(e.message); }
+});
+
+App.registerCommand('group-pause', async () => {
+  const gid = App.state.currentGroupId;
+  if (!gid) return;
+  try {
+    const r = await App.api.post(`/api/v1/groups/${gid}/pause`, {});
+    App.state.groupStatus = r.state;
+    updateGroupControls();
+  } catch (e) { toast(e.message); }
+});
+
+App.registerCommand('group-resume', async () => {
+  const gid = App.state.currentGroupId;
+  if (!gid) return;
+  try {
+    const r = await App.api.post(`/api/v1/groups/${gid}/resume`, {});
+    App.state.groupStatus = r.state;
+    updateGroupControls();
+  } catch (e) { toast(e.message); }
+});
+
+App.registerCommand('group-stop', async () => {
+  const gid = App.state.currentGroupId;
+  if (!gid) return;
+  try {
+    const r = await App.api.post(`/api/v1/groups/${gid}/stop`, {});
+    App.state.groupStatus = r.state;
+    updateGroupControls();
+  } catch (e) { toast(e.message); }
+});
+
+App.registerCommand('group-interject', async () => {
+  const gid = App.state.currentGroupId;
+  const input = $('group-interject-input');
+  const content = input.value.trim();
+  if (!gid || !content) return;
+  try {
+    await App.api.post(`/api/v1/groups/${gid}/interject`, { content });
+    input.value = '';
+    await reconcileGroupMessages();  // SSE 事件到达时由 gmsgSeen 去重
+  } catch (e) { toast(e.message); }
+});
+
+App.registerCommand('show-group-members', () => {
+  const g = App.state.currentGroup;
+  if (!g) return;
+  $('gm-title').textContent = `${g.name} · ${(g.members || []).length} 位成员`;
+  const box = $('gm-list');
+  box.innerHTML = '';
+  for (const m of g.members || []) {
+    const row = document.createElement('div');
+    row.className = 'gm-row';
+    row.innerHTML = `<span class="gmsg-avatar">${escapeHtml(m.avatar)}</span>
+      <span class="gm-name">${escapeHtml(m.name)}</span>
+      ${m.is_enabled ? '' : '<span class="tag">已停用</span>'}`;
+    box.appendChild(row);
+  }
+  $('modal-group-members').classList.remove('hidden');
+});
+
+App.registerCommand('open-group-editor', async (g) => {
+  if (g && !g.members) {
+    try { g = await App.api.get(`/api/v1/groups/${g.id}`); } catch (_) {}
+  }
+  $('group-modal-title').textContent = g ? '群聊设置' : '新建群聊';
+  $('ge-name').value = g?.name || '';
+  $('ge-topic').value = g?.topic || '';
+  const box = $('ge-members');
+  box.innerHTML = '';
+  const memberIds = new Set((g?.members || []).map((m) => m.bot_id));
+  for (const b of App.state.bots) {
+    const label = document.createElement('label');
+    label.className = 'member-check' + (b.is_enabled ? '' : ' disabled');
+    label.innerHTML = `<input type="checkbox" value="${b.id}" ${memberIds.has(b.id) ? 'checked' : ''} ${b.is_enabled ? '' : 'disabled'}>
+      <span class="member-avatar">${escapeHtml(b.avatar)}</span>
+      <span class="member-name">${escapeHtml(b.name)}${b.is_enabled ? '' : '（已停用）'}</span>`;
+    box.appendChild(label);
+  }
+  $('modal-group').dataset.groupId = g?.id || '';
+  $('modal-group').classList.remove('hidden');
+});
+
+App.registerCommand('save-group', async () => {
+  const name = $('ge-name').value.trim();
+  if (!name) { toast('群名称不能为空'); return; }
+  const ids = [...$('ge-members').querySelectorAll('input:checked')].map((c) => Number(c.value));
+  if (ids.length < 2 || ids.length > 10) { toast('请选择 2-10 个机器人'); return; }
+  const id = $('modal-group').dataset.groupId;
+  const body = { name, topic: $('ge-topic').value.trim(), bot_ids: ids };
+  if (id) {
+    const cur = App.state.currentGroup;
+    if (cur && cur.status !== 'idle') delete body.bot_ids;  // 运行中仅改 name/topic
+  }
+  try {
+    if (id) await App.api.patch(`/api/v1/groups/${id}`, body);
+    else await App.api.post('/api/v1/groups', body);
+  } catch (e) {
+    toast(e.code === 1002 ? '群聊进行中，先停止再修改成员' : e.message);
+    return;
+  }
+  $('modal-group').classList.add('hidden');
+  await refreshGroups();
+  if (App.state.currentGroupId) App.run('open-group-room', App.state.currentGroupId);
+  toast('群已保存');
+});
+
+App.registerCommand('delete-group', async (id) => {
+  const g = App.state.groups.find((x) => x.id === id);
+  if (!confirm(`删除群「${g?.name || ''}」？将同时清除群内消息。`)) return;
+  await App.api.del(`/api/v1/groups/${id}`);
+  if (App.state.currentGroupId === id) App.run('close-group-room');
+  await refreshGroups();
+});
+
+/* ================= 设置 ================= */
 App.registerCommand('open-settings', () => {
   const c = App.state.config || {};
   $('set-base-url').value = c.base_url || '';
@@ -614,43 +1038,58 @@ App.registerCommand('save-settings', async () => {
   toast('设置已保存');
 });
 
-/* ================= 事件绑定 ================= */
-document.addEventListener('DOMContentLoaded', () => App.run('boot'));
+/* ================= 启动 ================= */
+function backendOnline(online) {
+  $('status-dot').className = 'status-dot ' + (online ? 'ok' : 'err');
+  $('status-text').textContent = online ? '后端已连接' : '后端未连接';
+}
 
-$('btn-send').addEventListener('click', () => App.run('send-message'));
-$('btn-stop').addEventListener('click', () => App.run('stop-stream'));
-$('btn-new-session').addEventListener('click', () => App.run('new-session'));
-$('btn-settings').addEventListener('click', () => App.run('open-settings'));
-$('btn-export').addEventListener('click', () => App.run('export-session'));
-$('btn-clear').addEventListener('click', () => App.run('clear-session'));
-$('btn-settings-save').addEventListener('click', () => App.run('save-settings'));
-$('btn-settings-cancel').addEventListener('click', () => $('modal-settings').classList.add('hidden'));
-$('btn-persona-save').addEventListener('click', () => App.run('save-persona'));
-$('btn-persona-cancel').addEventListener('click', () => $('modal-persona').classList.add('hidden'));
+App.registerCommand('backend-status', (p) => {
+  backendOnline(p && p.online);
+});
 
-inputEl.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
-    e.preventDefault();
-    App.run('send-message');
+App.registerCommand('boot', async () => {
+  try {
+    App.state.config = await App.api.get('/api/v1/config');
+    applyTheme(App.state.config.theme);
+  } catch (_) {}
+  try {
+    await Promise.all([refreshBots(), refreshSessions(), refreshGroups()]);
+    backendOnline(true);
+  } catch (_) {
+    backendOnline(false);
+  }
+  const last = App.state.sessions[0];
+  if (last) App.run('select-session', last.id);
+  else {
+    $('messages').classList.add('hidden');
+    $('composer').classList.add('hidden');
+    $('chat-empty').classList.remove('hidden');
   }
 });
 
-messagesEl.addEventListener('click', (e) => {
-  const btn = e.target.closest('[data-action]');
-  if (!btn) return;
-  const msgEl = btn.closest('.msg');
-  const msgId = msgEl?.dataset.msgId;
-  if (btn.dataset.action === 'copy' && msgId) App.run('copy-message', msgId);
-  else if (btn.dataset.action === 'delete' && msgId) App.run('delete-message', msgId);
-  else if (btn.dataset.action === 'regenerate') App.run('regenerate');
-});
+/* ================= 事件绑定 ================= */
+document.addEventListener('DOMContentLoaded', () => App.run('boot'));
 
-/* WPF 桥接：窗口按钮 + 后端状态 */
+/* WPF 桥接（T1 契约） */
 const wv = window.chrome && window.chrome.webview;
 function winMsg(action) {
-  console.log('[bridge]', action);
-  if (wv) wv.postMessage({ type: 'window', payload: { action } });
+  if (!wv) return;
+  wv.postMessage({ type: 'window', payload: { action } });
 }
+$('titlebar').addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 || e.target.closest('.tb-actions')) return;
+  winMsg('drag');
+});
+$('titlebar').addEventListener('dblclick', (e) => {
+  if (e.target.closest('.tb-actions')) return;
+  winMsg('maxdbl');
+});
+$('titlebar').addEventListener('contextmenu', (e) => {
+  if (e.target.closest('.tb-actions')) return;
+  e.preventDefault();
+  winMsg('sysmenu');
+});
 if (wv) {
   $('btn-min').addEventListener('click', () => winMsg('minimize'));
   $('btn-max').addEventListener('click', () => winMsg('maximize'));
@@ -662,18 +1101,95 @@ if (wv) {
     } catch (_) {}
   });
 }
-// 标题栏拖动/双击最大化/右键系统菜单：转发给 WPF 合成原生窗口消息
-const titlebarEl = $('titlebar');
-titlebarEl.addEventListener('pointerdown', (e) => {
-  if (e.button !== 0 || e.target.closest('.tb-actions')) return;
-  winMsg('drag');
+$('btn-quit').addEventListener('click', () => winMsg('close'));
+
+document.querySelectorAll('.tab-btn').forEach((b) =>
+  b.addEventListener('click', () => switchView(b.dataset.view)));
+
+$('search-input').addEventListener('input', (e) => {
+  App.state.search = e.target.value;
+  if (App.state.view === 'messages') renderSessions();
+  else if (App.state.view === 'bots') renderBots();
+  else renderGroups();
 });
-titlebarEl.addEventListener('dblclick', (e) => {
-  if (e.target.closest('.tb-actions')) return;
-  winMsg('maxdbl');
+
+$('btn-send').addEventListener('click', () => App.run('send-message'));
+$('btn-stop').addEventListener('click', () => App.run('stop-stream'));
+$('btn-new-session').addEventListener('click', () => App.run('new-session'));
+$('btn-new-bot').addEventListener('click', () => App.run('open-bot-editor', null));
+$('btn-new-group').addEventListener('click', () => App.run('open-group-editor', null));
+$('btn-settings').addEventListener('click', () => App.run('open-settings'));
+$('btn-export').addEventListener('click', () => App.run('export-session'));
+$('btn-clear').addEventListener('click', () => App.run('clear-session'));
+$('btn-switch-bot').addEventListener('click', () => App.run('switch-session-bot'));
+$('btn-bot-edit').addEventListener('click', () => {
+  const b = App.state.bots.find((x) => x.id === App.state.selectedBotId);
+  if (b) App.run('open-bot-editor', b);
 });
-titlebarEl.addEventListener('contextmenu', (e) => {
-  if (e.target.closest('.tb-actions')) return;
-  e.preventDefault();
-  winMsg('sysmenu');
+$('btn-settings-save').addEventListener('click', () => App.run('save-settings'));
+$('btn-settings-cancel').addEventListener('click', () => $('modal-settings').classList.add('hidden'));
+$('btn-bot-save').addEventListener('click', () => App.run('save-bot'));
+$('btn-bot-cancel').addEventListener('click', () => $('modal-bot').classList.add('hidden'));
+$('btn-group-save').addEventListener('click', () => App.run('save-group'));
+$('btn-group-cancel').addEventListener('click', () => $('modal-group').classList.add('hidden'));
+$('btn-ns-save').addEventListener('click', () => App.run('save-new-session'));
+$('btn-ns-cancel').addEventListener('click', () => $('modal-new-session').classList.add('hidden'));
+$('btn-gm-close').addEventListener('click', () => $('modal-group-members').classList.add('hidden'));
+$('btn-group-members').addEventListener('click', () => App.run('show-group-members'));
+$('btn-group-rename').addEventListener('click', () => App.run('open-group-editor', App.state.currentGroup));
+$('btn-group-start').addEventListener('click', () => App.run('group-start'));
+$('btn-group-pause').addEventListener('click', () => App.run('group-pause'));
+$('btn-group-resume').addEventListener('click', () => App.run('group-resume'));
+$('btn-group-stop').addEventListener('click', () => App.run('group-stop'));
+$('btn-group-interject').addEventListener('click', () => App.run('group-interject'));
+
+inputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    App.run('send-message');
+  }
+});
+
+$('group-interject-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.isComposing) {
+    e.preventDefault();
+    App.run('group-interject');
+  }
+});
+
+messagesEl.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  const msgEl = btn.closest('.msg');
+  const msgId = msgEl?.dataset.msgId;
+  if (btn.dataset.action === 'copy' && msgEl) App.run('copy-message', msgEl);
+  else if (btn.dataset.action === 'delete' && msgId) App.run('delete-message', msgId);
+  else if (btn.dataset.action === 'regenerate') App.run('regenerate');
+});
+
+$('group-messages').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-action="copy"]');
+  if (!btn) return;
+  const content = btn.closest('.gmsg').querySelector('.gmsg-content');
+  if (!content) return;
+  try {
+    await navigator.clipboard.writeText(content.innerText);
+    toast('已复制');
+  } catch (_) { toast('复制失败'); }
+});
+
+$('bot-list').addEventListener('change', async (e) => {
+  const t = e.target.closest('[data-bot-toggle]');
+  if (!t) return;
+  const id = Number(t.dataset.botToggle);
+  try {
+    await App.api.post(`/api/v1/bots/${id}/enable`, { enabled: t.checked });
+    const b = App.state.bots.find((x) => x.id === id);
+    if (b) b.is_enabled = t.checked;
+    renderBots();
+    toast(t.checked ? '已启用' : '已停用');
+  } catch (err) {
+    t.checked = !t.checked;
+    toast(err.message);
+  }
 });
