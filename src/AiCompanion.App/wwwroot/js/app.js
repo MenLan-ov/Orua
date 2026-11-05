@@ -761,6 +761,7 @@ async function reconcileGroupMessages() {
     const msgs = await App.api.get(`/api/v1/groups/${gid}/messages?limit=200`);
     const el = $('group-messages');
     el.innerHTML = '';
+    App.state.gmsgSeen.clear();
     for (const m of [...msgs].reverse()) {
       addGroupBubbleChecked(m.bot_id, m.name, m.avatar, m.content, { id: m.id });
     }
