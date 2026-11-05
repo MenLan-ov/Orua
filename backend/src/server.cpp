@@ -113,7 +113,7 @@ void runChat(int64_t sessionId, const std::string& content, bool appendUser,
 
   // 先组装上下文再落库，避免 user 消息在 LLM 上下文中重复出现
   auto history = db::listMessages(sessionId);
-  auto ctx = chat::buildContext(*persona, history, keep, appendUser ? content : "");
+  auto ctx = chat::buildContext(persona->system_prompt, history, keep, appendUser ? content : "");
 
   if (appendUser) {
     auto sess = db::getSession(sessionId);

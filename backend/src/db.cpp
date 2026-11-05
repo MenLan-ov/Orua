@@ -45,6 +45,20 @@ CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS bots (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT NOT NULL,
+  avatar        TEXT NOT NULL DEFAULT '🤖',
+  greeting      TEXT NOT NULL DEFAULT '',
+  system_prompt TEXT NOT NULL,
+  temperature   REAL NOT NULL DEFAULT 0.8,
+  is_enabled    INTEGER NOT NULL DEFAULT 1,
+  api_base_url  TEXT NOT NULL DEFAULT '',
+  api_key_enc   TEXT NOT NULL DEFAULT '',
+  api_model     TEXT NOT NULL DEFAULT '',
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
 )SQL";
 
 std::string colText(sqlite3_stmt* st, int i) {
@@ -91,7 +105,7 @@ void execute(const char* sql, const std::vector<std::string>& params = {}) {
 }
 
 Session rowToSession(sqlite3_stmt* st) {
-  return {colInt(st, 0), colText(st, 1), colText(st, 2), colText(st, 3)};
+  return {colInt(st, 0), colText(st, 1), colInt(st, 2), colText(st, 3), colText(st, 4)};
 }
 Message rowToMessage(sqlite3_stmt* st) {
   return {colInt(st, 0), colInt(st, 1), colText(st, 2), colText(st, 3),
@@ -110,6 +124,22 @@ Persona rowToPersona(sqlite3_stmt* st) {
   p.updated_at = colText(st, 8);
   return p;
 }
+Bot rowToBot(sqlite3_stmt* st) {
+  Bot b;
+  b.id = colInt(st, 0);
+  b.name = colText(st, 1);
+  b.avatar = colText(st, 2);
+  b.greeting = colText(st, 3);
+  b.system_prompt = colText(st, 4);
+  b.temperature = sqlite3_column_double(st, 5);
+  b.is_enabled = colInt(st, 6) != 0;
+  b.api_base_url = colText(st, 7);
+  b.api_key_enc = colText(st, 8);
+  b.api_model = colText(st, 9);
+  b.created_at = colText(st, 10);
+  b.updated_at = colText(st, 11);
+  return b;
+}
 
 }  // namespace
 
@@ -124,16 +154,53 @@ bool open(const std::string& dbPath) {
   }
   try {
     exec(kSchema);
-    bool hasPersona = false;
-    query("SELECT COUNT(*) FROM personas", {},
-          [&](sqlite3_stmt* st) { hasPersona = colInt(st, 0) > 0; });
-    if (!hasPersona) {
-      Persona d;
-      d.name = "默认助手";
-      d.greeting = "你好呀，我是你的 AI 陪伴，有什么想聊的吗？";
-      d.system_prompt = "你是一个温暖、耐心的 AI 陪伴助手，用自然友好的语气和用户聊天。";
-      d.is_active = true;
-      createPersona(d);
+    // sessions.bot_id 列迁移（旧库 ALTER 补列；新库建表后同样走此路径）
+    bool hasBotId = false;
+    query("PRAGMA table_info(sessions)", {},
+          [&](sqlite3_stmt* st) {
+            if (colText(st, 1) == "bot_id") hasBotId = true;
+          });
+    if (!hasBotId)
+      exec("ALTER TABLE sessions ADD COLUMN bot_id INTEGER NOT NULL DEFAULT 0");
+
+    // personas → bots 一次性迁移（幂等：bots 已有数据则跳过）
+    bool hasBots = false;
+    query("SELECT COUNT(*) FROM bots", {},
+          [&](sqlite3_stmt* st) { hasBots = colInt(st, 0) > 0; });
+    if (!hasBots) {
+      bool hasPersonas = false;
+      query("SELECT COUNT(*) FROM personas", {},
+            [&](sqlite3_stmt* st) { hasPersonas = colInt(st, 0) > 0; });
+      bool defSet = false;
+      if (hasPersonas) {
+        for (auto& p : listPersonas()) {
+          Bot b;
+          b.name = p.name;
+          b.avatar = p.avatar;
+          b.greeting = p.greeting;
+          b.system_prompt = p.system_prompt;
+          b.temperature = p.temperature;
+          Bot nb = createBot(b);
+          if (p.is_active && !defSet) {
+            setSetting("default_bot_id", std::to_string(nb.id));
+            defSet = true;
+          }
+        }
+      } else {
+        Bot d;
+        d.name = "默认助手";
+        d.greeting = "你好呀，我是你的 AI 陪伴，有什么想聊的吗？";
+        d.system_prompt = "你是一个温暖、耐心的 AI 陪伴助手，用自然友好的语气和用户聊天。";
+        Bot nb = createBot(d);
+        setSetting("default_bot_id", std::to_string(nb.id));
+        defSet = true;
+      }
+      if (!defSet) {  // 旧库无激活人设：兜底取第一个
+        std::optional<int64_t> firstId;
+        query("SELECT id FROM bots ORDER BY id ASC LIMIT 1", {},
+              [&](sqlite3_stmt* st) { firstId = colInt(st, 0); });
+        if (firstId) setSetting("default_bot_id", std::to_string(*firstId));
+      }
     }
     return true;
   } catch (const std::exception& e) {
@@ -150,18 +217,24 @@ void close() {
   }
 }
 
-Session createSession(const std::string& title) {
+Session createSession(const std::string& title, int64_t botId) {
   std::lock_guard<std::recursive_mutex> lock(g_mtx);
   std::string ts = nowIso();
-  execute("INSERT INTO sessions(title, created_at, updated_at) VALUES(?,?,?)",
-          {title, ts, ts});
-  return {sqlite3_last_insert_rowid(g_db), title, ts, ts};
+  execute("INSERT INTO sessions(title, bot_id, created_at, updated_at) VALUES(?,?,?,?)",
+          {title, std::to_string(botId), ts, ts});
+  return {sqlite3_last_insert_rowid(g_db), title, botId, ts, ts};
+}
+
+void setSessionBot(int64_t sessionId, int64_t botId) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  execute("UPDATE sessions SET bot_id=?, updated_at=? WHERE id=?",
+          {std::to_string(botId), nowIso(), std::to_string(sessionId)});
 }
 
 std::vector<Session> listSessions() {
   std::lock_guard<std::recursive_mutex> lock(g_mtx);
   std::vector<Session> out;
-  query("SELECT id,title,created_at,updated_at FROM sessions ORDER BY updated_at DESC",
+  query("SELECT id,title,bot_id,created_at,updated_at FROM sessions ORDER BY updated_at DESC",
         {}, [&](sqlite3_stmt* st) { out.push_back(rowToSession(st)); });
   return out;
 }
@@ -186,7 +259,7 @@ void touchSession(int64_t id) {
 std::optional<Session> getSession(int64_t id) {
   std::lock_guard<std::recursive_mutex> lock(g_mtx);
   std::optional<Session> out;
-  query("SELECT id,title,created_at,updated_at FROM sessions WHERE id=?",
+  query("SELECT id,title,bot_id,created_at,updated_at FROM sessions WHERE id=?",
         {std::to_string(id)},
         [&](sqlite3_stmt* st) { out = rowToSession(st); });
   return out;
@@ -290,6 +363,86 @@ std::optional<Persona> getActivePersona() {
   query("SELECT id,name,avatar,greeting,system_prompt,temperature,is_active,"
         "created_at,updated_at FROM personas WHERE is_active=1 LIMIT 1",
         {}, [&](sqlite3_stmt* st) { out = rowToPersona(st); });
+  return out;
+}
+
+Bot createBot(const Bot& b) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  std::string ts = nowIso();
+  execute("INSERT INTO bots(name,avatar,greeting,system_prompt,temperature,is_enabled,"
+          "api_base_url,api_key_enc,api_model,created_at,updated_at) "
+          "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+          {b.name, b.avatar, b.greeting, b.system_prompt,
+           std::to_string(b.temperature), b.is_enabled ? "1" : "0",
+           b.api_base_url, b.api_key_enc, b.api_model, ts, ts});
+  Bot out = b;
+  out.id = sqlite3_last_insert_rowid(g_db);
+  out.created_at = out.updated_at = ts;
+  return out;
+}
+
+bool updateBot(const Bot& b) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  execute("UPDATE bots SET name=?,avatar=?,greeting=?,system_prompt=?,temperature=?,"
+          "is_enabled=?,api_base_url=?,api_key_enc=?,api_model=?,updated_at=? WHERE id=?",
+          {b.name, b.avatar, b.greeting, b.system_prompt,
+           std::to_string(b.temperature), b.is_enabled ? "1" : "0",
+           b.api_base_url, b.api_key_enc, b.api_model, nowIso(), std::to_string(b.id)});
+  return sqlite3_changes(g_db) > 0;
+}
+
+bool deleteBot(int64_t id) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  auto def = getDefaultBot();   // recursive_mutex 可重入
+  if (def && def->id == id) return false;
+  execute("UPDATE sessions SET bot_id=0 WHERE bot_id=?", {std::to_string(id)});
+  execute("DELETE FROM bots WHERE id=?", {std::to_string(id)});
+  return true;
+}
+
+std::vector<Bot> listBots() {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  std::vector<Bot> out;
+  query("SELECT id,name,avatar,greeting,system_prompt,temperature,is_enabled,"
+        "api_base_url,api_key_enc,api_model,created_at,updated_at "
+        "FROM bots ORDER BY id ASC",
+        {}, [&](sqlite3_stmt* st) { out.push_back(rowToBot(st)); });
+  return out;
+}
+
+std::optional<Bot> getBot(int64_t id) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  std::optional<Bot> out;
+  query("SELECT id,name,avatar,greeting,system_prompt,temperature,is_enabled,"
+        "api_base_url,api_key_enc,api_model,created_at,updated_at "
+        "FROM bots WHERE id=?",
+        {std::to_string(id)},
+        [&](sqlite3_stmt* st) { out = rowToBot(st); });
+  return out;
+}
+
+bool setBotEnabled(int64_t id, bool enabled) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  execute("UPDATE bots SET is_enabled=?, updated_at=? WHERE id=?",
+          {enabled ? "1" : "0", nowIso(), std::to_string(id)});
+  return sqlite3_changes(g_db) > 0;
+}
+
+std::optional<Bot> getDefaultBot() {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  auto idStr = getSetting("default_bot_id");
+  if (idStr) {
+    try {
+      auto b = getBot(std::stoll(*idStr));
+      if (b) return b;
+    } catch (...) {
+    }
+  }
+  std::optional<Bot> out;
+  query("SELECT id,name,avatar,greeting,system_prompt,temperature,is_enabled,"
+        "api_base_url,api_key_enc,api_model,created_at,updated_at "
+        "FROM bots ORDER BY id ASC LIMIT 1",
+        {}, [&](sqlite3_stmt* st) { out = rowToBot(st); });
   return out;
 }
 

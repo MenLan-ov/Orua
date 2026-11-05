@@ -11,13 +11,14 @@ std::filesystem::path tmpDb(const char* name) {
 }
 }  // namespace
 
-TEST_CASE("db: 打开即建表并播种默认人设") {
+TEST_CASE("db: 打开即建表并播种默认机器人") {
   auto path = tmpDb("ac_test_seed.db");
   REQUIRE(db::open(path.string()));
-  auto personas = db::listPersonas();
-  REQUIRE(personas.size() == 1);
-  REQUIRE(personas[0].is_active);
-  CHECK(personas[0].name == "默认助手");
+  auto bots = db::listBots();
+  REQUIRE(bots.size() == 1);
+  auto def = db::getDefaultBot();
+  REQUIRE(def.has_value());
+  CHECK(def->name == "默认助手");
   db::close();
   std::filesystem::remove(path);
 }
@@ -79,7 +80,7 @@ TEST_CASE("db: 人设 CRUD 与激活约束") {
 
   created.greeting = "喵喵~";
   CHECK(db::updatePersona(created));
-  CHECK(db::listPersonas().size() == 2);
+  CHECK(db::listPersonas().size() == 1);  // 本任务起不再播种默认人设
   db::close();
   std::filesystem::remove(path);
 }

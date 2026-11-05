@@ -28,6 +28,8 @@ enable_testing()
 add_executable(backend_tests
   tests/test_main.cpp
   tests/test_db.cpp
+  tests/test_bots.cpp
+  tests/test_migration.cpp
   tests/test_config.cpp
   tests/test_dpapi.cpp
   tests/test_openai_parser.cpp

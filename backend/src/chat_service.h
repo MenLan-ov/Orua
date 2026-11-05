@@ -8,7 +8,7 @@
 namespace chat {
 
 // keep_rounds <= 0 表示不限轮数
-std::vector<llm::ChatMsg> buildContext(const db::Persona& persona,
+std::vector<llm::ChatMsg> buildContext(const std::string& systemPrompt,
                                        const std::vector<db::Message>& history,
                                        int keep_rounds,
                                        const std::string& newUser);

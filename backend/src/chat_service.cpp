@@ -2,12 +2,12 @@
 
 namespace chat {
 
-std::vector<llm::ChatMsg> buildContext(const db::Persona& persona,
+std::vector<llm::ChatMsg> buildContext(const std::string& systemPrompt,
                                        const std::vector<db::Message>& history,
                                        int keep_rounds,
                                        const std::string& newUser) {
   std::vector<llm::ChatMsg> out;
-  out.push_back({"system", persona.system_prompt});
+  out.push_back({"system", systemPrompt});
 
   // 定位截断起点：历史中倒数第 keep_rounds 条 user 消息的下标
   std::vector<size_t> userIdx;
