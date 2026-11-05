@@ -651,12 +651,7 @@ if (wv) {
   $('btn-min').addEventListener('click', () => wv.postMessage({ type: 'window', payload: { action: 'minimize' } }));
   $('btn-max').addEventListener('click', () => wv.postMessage({ type: 'window', payload: { action: 'maximize' } }));
   $('btn-close').addEventListener('click', () => wv.postMessage({ type: 'window', payload: { action: 'close' } }));
-  const tb = $('titlebar');
-  tb.addEventListener('mousedown', (e) => {
-    if (e.target.closest('.tb-actions')) return;
-    if (e.detail === 2) wv.postMessage({ type: 'window', payload: { action: 'maximize' } });
-    else wv.postMessage({ type: 'window', payload: { action: 'drag' } });
-  });
+  // 标题栏拖拽/双击最大化由 WPF 侧 WM_NCHITTEST→HTCAPTION 原生处理，无需 JS 转发
   wv.addEventListener('message', (e) => {
     try {
       const m = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
