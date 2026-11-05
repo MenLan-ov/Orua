@@ -1,5 +1,6 @@
 #include "db.h"
 
+#include <algorithm>
 #include <mutex>
 #include <stdexcept>
 
@@ -293,9 +294,10 @@ std::vector<Message> listMessages(int64_t sessionId, int limit) {
   std::lock_guard<std::recursive_mutex> lock(g_mtx);
   std::vector<Message> out;
   query("SELECT id,session_id,role,content,created_at FROM messages "
-        "WHERE session_id=? ORDER BY id ASC LIMIT ?",
+        "WHERE session_id=? ORDER BY id DESC LIMIT ?",
         {std::to_string(sessionId), std::to_string(limit)},
         [&](sqlite3_stmt* st) { out.push_back(rowToMessage(st)); });
+  std::reverse(out.begin(), out.end());
   return out;
 }
 
