@@ -46,6 +46,30 @@ struct Bot {
   std::string created_at;
   std::string updated_at;
 };
+struct Group {
+  int64_t id = 0;
+  std::string name;
+  std::string topic;
+  std::string status = "idle";   // idle | running | paused（运行态仅内存语义，落库便于恢复）
+  int member_count = 0;          // 列表/详情查询时填充
+  std::string last_active;       // 最后一条群消息时间，无则空
+  std::string created_at;
+  std::string updated_at;
+};
+struct GroupMember {
+  int64_t id = 0;
+  int64_t group_id = 0;
+  int64_t bot_id = 0;
+  int position = 0;
+};
+struct GroupMessage {
+  int64_t id = 0;
+  int64_t group_id = 0;
+  int64_t bot_id = 0;   // 0 = 用户插话（库内 NULL）
+  std::string role;     // "user" | "assistant"
+  std::string content;
+  std::string created_at;
+};
 
 bool open(const std::string& dbPath);
 void close();
@@ -74,6 +98,20 @@ std::vector<Bot> listBots();
 std::optional<Bot> getBot(int64_t id);
 bool setBotEnabled(int64_t id, bool enabled);
 std::optional<Bot> getDefaultBot();    // settings default_bot_id，兜底取第一个
+
+Group createGroup(const std::string& name, const std::string& topic);
+bool updateGroup(int64_t id, const std::optional<std::string>& name,
+                 const std::optional<std::string>& topic);
+bool setGroupStatus(int64_t id, const std::string& status);
+void touchGroup(int64_t id);
+void deleteGroup(int64_t id);
+std::vector<Group> listGroups();
+std::optional<Group> getGroup(int64_t id);
+void setGroupMembers(int64_t groupId, const std::vector<int64_t>& botIds);
+std::vector<GroupMember> listGroupMembers(int64_t groupId);
+GroupMessage appendGroupMessage(int64_t groupId, int64_t botId,
+                                const std::string& role, const std::string& content);
+std::vector<GroupMessage> listGroupMessages(int64_t groupId, int limit = 0);
 
 Persona createPersona(const Persona& p);
 bool updatePersona(const Persona& p);

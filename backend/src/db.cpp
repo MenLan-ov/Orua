@@ -59,6 +59,30 @@ CREATE TABLE IF NOT EXISTS bots (
   created_at    TEXT NOT NULL,
   updated_at    TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS groups (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT NOT NULL,
+  topic      TEXT NOT NULL DEFAULT '',
+  status     TEXT NOT NULL DEFAULT 'idle',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS group_members (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  bot_id   INTEGER NOT NULL REFERENCES bots(id),
+  position INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_group_members_group ON group_members(group_id, position);
+CREATE TABLE IF NOT EXISTS group_messages (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id   INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  bot_id     INTEGER,
+  role       TEXT NOT NULL CHECK(role IN ('user','assistant')),
+  content    TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_group_messages_group ON group_messages(group_id, id);
 )SQL";
 
 std::string colText(sqlite3_stmt* st, int i) {
@@ -202,6 +226,7 @@ bool open(const std::string& dbPath) {
         if (firstId) setSetting("default_bot_id", std::to_string(*firstId));
       }
     }
+    exec("UPDATE groups SET status='idle'");
     return true;
   } catch (const std::exception& e) {
     logx::error(std::string("db init failed: ") + e.what());
@@ -396,6 +421,7 @@ bool deleteBot(int64_t id) {
   auto def = getDefaultBot();   // recursive_mutex 可重入
   if (def && def->id == id) return false;
   execute("UPDATE sessions SET bot_id=0 WHERE bot_id=?", {std::to_string(id)});
+  execute("DELETE FROM group_members WHERE bot_id=?", {std::to_string(id)});
   execute("DELETE FROM bots WHERE id=?", {std::to_string(id)});
   return true;
 }
@@ -443,6 +469,139 @@ std::optional<Bot> getDefaultBot() {
         "api_base_url,api_key_enc,api_model,created_at,updated_at "
         "FROM bots ORDER BY id ASC LIMIT 1",
         {}, [&](sqlite3_stmt* st) { out = rowToBot(st); });
+  return out;
+}
+
+Group rowToGroup(sqlite3_stmt* st) {
+  Group g;
+  g.id = colInt(st, 0);
+  g.name = colText(st, 1);
+  g.topic = colText(st, 2);
+  g.status = colText(st, 3);
+  g.created_at = colText(st, 4);
+  g.updated_at = colText(st, 5);
+  g.member_count = static_cast<int>(colInt(st, 6));
+  g.last_active = colText(st, 7);
+  return g;
+}
+
+const char* kGroupCols = "g.id, g.name, g.topic, g.status, g.created_at, g.updated_at, "
+                         "(SELECT COUNT(*) FROM group_members m WHERE m.group_id=g.id), "
+                         "(SELECT MAX(created_at) FROM group_messages gm WHERE gm.group_id=g.id) ";
+
+Group createGroup(const std::string& name, const std::string& topic) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  std::string ts = nowIso();
+  execute("INSERT INTO groups(name, topic, created_at, updated_at) VALUES(?,?,?,?)",
+          {name, topic, ts, ts});
+  Group g;
+  g.id = sqlite3_last_insert_rowid(g_db);
+  g.name = name;
+  g.topic = topic;
+  g.status = "idle";
+  g.created_at = g.updated_at = ts;
+  return g;
+}
+
+bool updateGroup(int64_t id, const std::optional<std::string>& name,
+                 const std::optional<std::string>& topic) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  if (name) execute("UPDATE groups SET name=?, updated_at=? WHERE id=?",
+                    {*name, nowIso(), std::to_string(id)});
+  if (topic) execute("UPDATE groups SET topic=?, updated_at=? WHERE id=?",
+                     {*topic, nowIso(), std::to_string(id)});
+  return true;
+}
+
+bool setGroupStatus(int64_t id, const std::string& status) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  execute("UPDATE groups SET status=?, updated_at=? WHERE id=?",
+          {status, nowIso(), std::to_string(id)});
+  return sqlite3_changes(g_db) > 0;
+}
+
+void touchGroup(int64_t id) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  execute("UPDATE groups SET updated_at=? WHERE id=?", {nowIso(), std::to_string(id)});
+}
+
+void deleteGroup(int64_t id) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  execute("DELETE FROM groups WHERE id=?", {std::to_string(id)});
+}
+
+std::vector<Group> listGroups() {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  std::vector<Group> out;
+  std::string sql = std::string("SELECT ") + kGroupCols +
+                    "FROM groups g ORDER BY g.updated_at DESC";
+  query(sql.c_str(), {}, [&](sqlite3_stmt* st) { out.push_back(rowToGroup(st)); });
+  return out;
+}
+
+std::optional<Group> getGroup(int64_t id) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  std::optional<Group> out;
+  std::string sql = std::string("SELECT ") + kGroupCols + "FROM groups g WHERE g.id=?";
+  query(sql.c_str(), {std::to_string(id)},
+        [&](sqlite3_stmt* st) { out = rowToGroup(st); });
+  return out;
+}
+
+void setGroupMembers(int64_t groupId, const std::vector<int64_t>& botIds) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  execute("DELETE FROM group_members WHERE group_id=?", {std::to_string(groupId)});
+  for (size_t i = 0; i < botIds.size(); ++i)
+    execute("INSERT INTO group_members(group_id, bot_id, position) VALUES(?,?,?)",
+            {std::to_string(groupId), std::to_string(botIds[i]), std::to_string(i)});
+  execute("UPDATE groups SET updated_at=? WHERE id=?",
+          {nowIso(), std::to_string(groupId)});
+}
+
+std::vector<GroupMember> listGroupMembers(int64_t groupId) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  std::vector<GroupMember> out;
+  query("SELECT id, group_id, bot_id, position FROM group_members "
+        "WHERE group_id=? ORDER BY position ASC",
+        {std::to_string(groupId)}, [&](sqlite3_stmt* st) {
+          out.push_back({colInt(st, 0), colInt(st, 1), colInt(st, 2),
+                         static_cast<int>(colInt(st, 3))});
+        });
+  return out;
+}
+
+GroupMessage appendGroupMessage(int64_t groupId, int64_t botId,
+                                const std::string& role, const std::string& content) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  std::string ts = nowIso();
+  sqlite3_stmt* st = nullptr;
+  sqlite3_prepare_v2(g_db,
+      "INSERT INTO group_messages(group_id, bot_id, role, content, created_at) "
+      "VALUES(?,?,?,?,?)", -1, &st, nullptr);
+  sqlite3_bind_int64(st, 1, groupId);
+  if (botId > 0) sqlite3_bind_int64(st, 2, botId);
+  else sqlite3_bind_null(st, 2);
+  sqlite3_bind_text(st, 3, role.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(st, 4, content.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(st, 5, ts.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_step(st);
+  sqlite3_finalize(st);
+  execute("UPDATE groups SET updated_at=? WHERE id=?",
+          {ts, std::to_string(groupId)});
+  return {sqlite3_last_insert_rowid(g_db), groupId, botId, role, content, ts};
+}
+
+std::vector<GroupMessage> listGroupMessages(int64_t groupId, int limit) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  std::vector<GroupMessage> out;
+  query("SELECT id, group_id, bot_id, role, content, created_at FROM group_messages "
+        "WHERE group_id=? ORDER BY id ASC",
+        {std::to_string(groupId)}, [&](sqlite3_stmt* st) {
+          out.push_back({colInt(st, 0), colInt(st, 1), colInt(st, 2), colText(st, 3),
+                         colText(st, 4), colText(st, 5)});
+        });
+  if (limit > 0 && out.size() > static_cast<size_t>(limit))
+    out.erase(out.begin(), out.end() - limit);
   return out;
 }
 
