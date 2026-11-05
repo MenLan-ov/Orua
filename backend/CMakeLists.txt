@@ -12,6 +12,19 @@ target_include_directories(sqlite3 PUBLIC third_party/sqlite)
 add_executable(backend
   src/main.cpp
   src/logger.cpp
+  src/db.cpp
 )
 target_include_directories(backend PRIVATE src third_party)
 target_link_libraries(backend PRIVATE sqlite3 winhttp crypt32 ws2_32)
+
+enable_testing()
+
+add_executable(backend_tests
+  tests/test_main.cpp
+  tests/test_db.cpp
+  src/db.cpp
+  src/logger.cpp
+)
+target_include_directories(backend_tests PRIVATE src third_party)
+target_link_libraries(backend_tests PRIVATE sqlite3 winhttp crypt32 ws2_32)
+add_test(NAME backend_tests COMMAND backend_tests)
