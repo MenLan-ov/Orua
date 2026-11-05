@@ -18,6 +18,7 @@ add_executable(backend
   src/openai_provider.cpp
   src/chat_service.cpp
   src/event_bus.cpp
+  src/group_engine.cpp
   src/server.cpp
 )
 target_include_directories(backend PRIVATE src third_party)
@@ -36,12 +37,14 @@ add_executable(backend_tests
   tests/test_openai_parser.cpp
   tests/test_chat_service.cpp
   tests/test_event_bus.cpp
+  tests/test_group_engine.cpp
   src/db.cpp
   src/config.cpp
   src/dpapi_util.cpp
   src/openai_provider.cpp
   src/chat_service.cpp
   src/event_bus.cpp
+  src/group_engine.cpp
   src/logger.cpp
 )
 target_include_directories(backend_tests PRIVATE src third_party)
