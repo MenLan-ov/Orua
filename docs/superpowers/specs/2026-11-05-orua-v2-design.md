@@ -1,0 +1,202 @@
+# Orua v2 设计规格：界面改版、机器人体系与群聊
+
+> 日期：2026-11-05
+> 状态：已与用户逐节确认（界面架构 / 数据与后端 / 迁移容错测试）
+> 上游：`docs/superpowers/specs/2026-11-05-ai-companion-desktop-design.md`（v1 规格，本规格在其之上演进）
+
+## 1. 目标
+
+在 v1（WPF + WebView2 + C++ 后端 + SQLite）基础上完成三项变更：
+
+1. **改名**：程序显示名由「AI 陪伴」改为 **Orua**（窗口标题、标题栏、UI 文案、README；内部工程名 AiCompanion 不变）。
+2. **修复标题栏交互**：拖动、双击最大化/还原、右键系统菜单在 v1 中全部失效（根因见 §9），本版本修复。
+3. **机器人体系 + 群聊**：支持创建多个机器人（每人设 + 可选独立 API 配置），并可将 2-10 个机器人拉进一个群，群内机器人自动轮流连聊，用户实时围观、插话、暂停、停止。
+
+v1 全部既有功能不得丢失：多会话、流式打字机、Markdown + 代码高亮、消息复制/重新生成/删除/清空、自动标题、会话导出 md/json/txt、多主题、HTTP 代理、DPAPI 加密 Key、后端守护自动重启、插件 Webhook。
+
+## 2. 总体架构（变更点）
+
+架构不变：WPF 壳 → WebView2（app.local）→ C++ 后端（127.0.0.1:8765 回退 8766-8775）→ WinHTTP → 外部 OpenAI 兼容 API。变更集中在三层：
+
+| 层 | 变更 |
+|---|---|
+| 数据层 | 新增 bots/groups/group_members/group_messages 表；sessions 加 bot_id；personas 数据一次性迁移 |
+| 后端 | `/api/v1/personas` 重构为 `/api/v1/bots`；新增 `/api/v1/groups` CRUD + 控制端点 + 群聊引擎（后端驱动状态机）+ 群 SSE；单聊 chat 按会话绑定机器人取配置 |
+| 前端 | index.html/app.js/theme.css 全面重构为参考图信息架构；新增机器人管理、群聊室视图 |
+| WPF | 窗口标题 Orua；桥协议增加 drag/maxdbl/sysmenu 动作；移除失效的 WM_NCHITTEST hook |
+
+## 3. 数据模型
+
+SQLite（沿用 WAL + 外键，时间戳 ISO8601 UTC）。新增/变更：
+
+```sql
+-- 机器人（由 personas 演进而来）
+CREATE TABLE bots (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT NOT NULL,
+  avatar        TEXT NOT NULL DEFAULT '🤖',
+  greeting      TEXT NOT NULL DEFAULT '',
+  system_prompt TEXT NOT NULL,
+  temperature   REAL NOT NULL DEFAULT 0.8,
+  is_enabled    INTEGER NOT NULL DEFAULT 1,
+  -- API 覆盖项：NULL/空串 = 继承全局默认（settings 中 api_base_url/api_key_enc/api_model）
+  api_base_url  TEXT NOT NULL DEFAULT '',
+  api_key_enc   TEXT NOT NULL DEFAULT '',
+  api_model     TEXT NOT NULL DEFAULT '',
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+
+-- sessions 增加 bot_id（ALTER TABLE ADD COLUMN，默认 0 = 未绑定 → 运行时按默认机器人处理）
+ALTER TABLE sessions ADD COLUMN bot_id INTEGER NOT NULL DEFAULT 0;
+
+-- 群
+CREATE TABLE groups (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT NOT NULL,
+  topic      TEXT NOT NULL DEFAULT '',
+  status     TEXT NOT NULL DEFAULT 'idle',  -- idle | running | paused（运行态仅内存语义，落库便于恢复）
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+-- 群成员（position = 发言轮转顺序）
+CREATE TABLE group_members (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  bot_id   INTEGER NOT NULL REFERENCES bots(id),
+  position INTEGER NOT NULL
+);
+CREATE INDEX idx_group_members_group ON group_members(group_id, position);
+
+-- 群消息（bot_id NULL = 用户插话）
+CREATE TABLE group_messages (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id   INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  bot_id     INTEGER,  -- NULL = 用户插话
+  role       TEXT NOT NULL CHECK(role IN ('user','assistant')),
+  content    TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_group_messages_group ON group_messages(group_id, id);
+```
+
+**迁移（db::open 内一次性、幂等）**：
+- 建新表（IF NOT EXISTS）；
+- `PRAGMA table_info(sessions)` 无 bot_id 列则 ADD COLUMN；
+- personas 表存在且有数据时：逐行迁入 bots（is_active=1 的行迁入后其 id 记入 `settings(key='default_bot_id')`）；无 personas 数据则播种默认机器人「默认助手」；迁移完成后不再读写 personas 表；
+- 幂等依据：bots 表已有数据时跳过迁移。重复启动不重复执行。
+
+## 4. 后端 API
+
+统一 `/api/v1/` 前缀与 `{"code":0,"data":...}` / `{"code":<非0>,"message":"..."}` 信封；SSE 事件 `event: <name>` + 单行 JSON `data:`。
+
+### 4.1 机器人 `/api/v1/bots`
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | /bots | 列表（含 api_key 掩码：`前6+…+后4`） |
+| POST | /bots | 创建。body: name, avatar?, greeting?, system_prompt?, temperature?, api_base_url?, api_key?, api_model?（api_key 明文入、DPAPI 加密存） |
+| PATCH | /bots/{id} | 同上字段可选更新（api_key 传空串=清除覆盖、不传=不变） |
+| DELETE | /bots/{id} | 默认机器人不可删（返回错误码 1001）；删除后其群成员记录级联清理，会话 bot_id 复位 0 |
+| POST | /bots/{id}/enable | {enabled:bool} 启停；停用的机器人不可参与新群、不可开新对话（存量会话可读历史） |
+
+### 4.2 群 `/api/v1/groups`
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | /groups | 列表（含成员数、状态、最后活跃时间） |
+| POST | /groups | 创建。body: name, bot_ids[]（2-10 个、须启用、顺序即发言顺序）, topic? |
+| GET | /groups/{id} | 详情 + 成员（含头像/名字） |
+| PATCH | /groups/{id} | name?, topic?（topic 任意状态可改，下一轮生效）, bot_ids[]?（仅 idle 状态可改成员） |
+| DELETE | /groups/{id} | 级联删成员与消息；运行中先停止 |
+| GET | /groups/{id}/messages?limit=200 | 群消息，created_at DESC（前端自行反转，与单聊一致） |
+| POST | /groups/{id}/start | {topic?} 启动自动连聊（idle→running；running 时返回 1002） |
+| POST | /groups/{id}/pause | running→paused |
+| POST | /groups/{id}/resume | paused→running |
+| POST | /groups/{id}/stop | 任意→idle（当前轮尽快中止） |
+| POST | /groups/{id}/interject | {content} 用户插话：存一条 user 消息；running 状态则下一轮机器人回应插话 |
+| GET | /groups/{id}/stream | SSE 群流，见 §5 |
+
+### 4.3 单聊调整
+
+- POST /api/v1/sessions body 增加 `bot_id?`（缺省=前端默认选中的机器人；不传且无默认机器人则 400）
+- PATCH /api/v1/sessions/{id} 增加 `bot_id?`（切换机器人，不清理历史消息）
+- POST /api/v1/chat/stream|regenerate：LLM 参数按会话 bot_id 解析——机器人 api_base_url/api_key_enc/api_model 非空则覆盖全局 settings，temperature 用机器人的值；bot_id=0 或机器人被删 → 全局默认
+- `/api/v1/personas` 全部移除（内部重构，无外部消费者）；「默认机器人」仅用于迁移与兜底
+
+## 5. 群聊引擎（后端驱动）
+
+每群一个**引擎实例**（`GroupEngine`，独立 std::thread + 状态锁；多群并行互不影响）：
+
+- **状态机**：idle → running ⇄ paused → idle。所有控制端点只改状态标志；循环每轮之间检查状态。
+- **轮转**：按 group_members.position 顺序取下一发言人；跳过已停用的机器人（记录跳过事件）。
+- **单轮流程**：组装上下文（该机器人 system_prompt + 群话题 + 最近 20 条群消息，不含其他机器人的人设）→ 用该机器人配置流式调用（LLM_MOCK 时内置假流）→ 每片 delta 广播 → 完成后存库（assistant）→ 下一轮。
+- **SSE 事件**（`/groups/{id}/stream`，多客户端订阅同一广播）：
+  - `status` `{state, turn}`（状态变化/轮数）
+  - `turn_start` `{bot_id, name, avatar, turn}`
+  - `delta` `{bot_id, text}`
+  - `turn_end` `{bot_id}`
+  - `interject` `{message}`（用户插话，含 id/content/created_at）
+  - `error` `{bot_id, name, message}`（单轮失败）
+- **失败策略**：单轮失败存一条错误事件并广播，跳过该发言人继续；**同一机器人连续 3 次失败 → 自动 pause** 并广播 status。网络中断重试一次后仍失败即计为失败。
+- **生命周期**：后端启动时将所有 groups.status 复位为 idle（引擎为内存态，重启即消失）；WPF 守护重启后端后，前端按群列表重新订阅，群聊室提示「群聊已中断，可重新开聊」。
+- **上限**：轮数无硬上限，status 事件带 turn 计数由前端展示；群成员 2-10；单群同时仅一个循环。
+
+## 6. 前端信息架构（参考图风格，「类似就行」）
+
+默认主题改为参考图深海军蓝（#0f172a 系）；保留 4 套主题（dark/light/sakura/midnight），dark 即新默认。
+
+**左侧边栏（约 260px）**：顶部圆形头像（字母 O）+「Orua」+ 副标题；搜索框（过滤会话/机器人/群名）；标签页 **消息 / 机器人 / 群聊**；对应操作按钮 ＋新对话 / ＋新机器人 / ＋新建群；下方列表；底部状态栏（绿点「后端已连接」+ 版本 + 设置 + 退出）。
+
+**主区域**：顶栏（标题 + 副标题 + 导出/清空等操作）；消息流；底部输入区。空状态：居中图标 + 双行文案。
+
+**视图**：
+1. **消息**：新对话弹窗选机器人；会话绑定机器人、可切换；保留 v1 全部单聊功能。
+2. **机器人**：创建/编辑弹窗（名称、emoji 头像、开场白、System Prompt、温度、API 覆盖项「留空 = 使用默认配置」）；启用/停用开关；删除（默认机器人禁删）。
+3. **群聊**：创建群弹窗（群名 + 勾选 2-10 个机器人 + 可选开场话题）；群聊室——每条消息气泡带发言人头像与名字、流式打字机、Markdown 渲染；底部控制条：开聊（可改话题）、暂停/继续、停止、插话输入框 + 轮数显示；右侧或弹层成员面板；群消息支持复制。
+4. **设置**：全局 API 改名「默认 API 配置」；主题、上下文轮数、代理、关于保留。
+
+## 7. WPF 壳与桥协议
+
+- 窗口标题「Orua」，标题栏文案「✦ Orua」；BackendProcess 守护逻辑不变。
+- **桥协议（JS→WPF）**：`{type:"window", payload:{action}}`，action 增加：
+  - `drag` → `ReleaseCapture(); SendMessage(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, lParam)`
+  - `maxdbl` → `SendMessage(hwnd, WM_NCLBUTTONDBLCLK, HTCAPTION, lParam)`
+  - `sysmenu` → `GetSystemMenu(hwnd,false)` 后 `TrackPopupMenu(TPM_RETURNCMD|TPM_LEFTBUTTON|TPM_RIGHTBUTTON, GetCursorPos())`
+  - 保留 `minimize` / `maximize` / `close`
+- **移除 WM_NCHITTEST hook**：v1 失效根因——鼠标按下时命中目标为覆盖整个客户区的 WebView2 子窗口，WM_LBUTTONDOWN 作为子窗口客户区消息直接投递，顶层窗口 WM_NCHITTEST 的 HTCAPTION 判定不参与该路由；合成 WM_NCLBUTTONDOWN 走 DefWindowProc 原生拖拽循环才是可靠路径。
+- JS 端：titlebar 区域绑定 pointerdown（仅左键）/ dblclick / contextmenu 事件，转发对应 action；min/max/close 按钮沿用现有 postMessage。
+
+## 8. 错误处理
+
+- API 层错误码：1001=默认机器人不可删，1002=状态冲突（running 时 start/改成员），1003=成员数越界，1004=含停用机器人，其余沿用 v1（1=通用错误等）。
+- 群引擎错误不向 SSE 之外抛异常；引擎线程与 httplib 生命周期解耦（析构/停止时 join）。
+- 前端：SSE 断开自动重连（退避 1s/2s/4s）；error 事件渲染「⚠ 机器人 X 回复失败：原因」气泡；status 事件驱动控制条按钮态。
+
+## 9. 测试策略
+
+- **后端单测（doctest 扩展）**：
+  - test_bots.cpp：bots CRUD、API 覆盖继承全局、Key 掩码、默认机器人删除保护
+  - test_migration.cpp：旧 personas 数据 → bots 迁移 + sessions.bot_id 回填 + 重复 open 幂等
+  - test_groups.cpp：groups/成员 CRUD、状态冲突码
+  - test_group_engine.cpp（LLM_MOCK）：轮转顺序、上下文组装（话题+20 条窗口）、单轮失败跳过、连续 3 次失败自动暂停、pause/resume/stop、插话、多群并行互不干扰
+- **集成（test_api.ps1 扩展）**：bots CRUD 断言；groups 创建 → start → SSE 收取 turn_start/delta/turn_end ≥2 轮 → stop → 消息落库断言；interject 断言
+- **前端**：手动清单 + UIA/截图自动化验证（三视图渲染、控制条状态流转）
+- **标题栏**：桥接消息日志验证 + 用户实机复测拖拽/双击/右键（本测试环境输入注入被系统过滤，注入类自动化无效，已充分排查）
+
+## 10. 明确排除项
+
+- 参考图的好友 / 市场 / 记忆库等平台社交功能（本程序单机自用）
+- 多端同步、账号体系、语音输入
+- 安装包（维持开发态运行 + 既有打包建议）
+- 群聊消息导出（后续可加，本版不做）
+
+## 11. 验收标准
+
+1. 窗口标题与 UI 显示「Orua」；标题栏拖动、双击最大化/还原、右键系统菜单实机可用
+2. 创建 ≥3 个机器人（含不同 API 覆盖），新建 1v1 会话可任选机器人流式对话
+3. 创建含 2-10 个机器人的群，点开聊后机器人按顺序自动连聊、消息流式展示；暂停/继续/停止/插话/换话题全部可用
+4. 某机器人 API 不可用时该轮显示失败气泡、群聊不中断；连续 3 次失败自动暂停
+5. 重启程序后：机器人/群/历史消息完整；群状态复位 idle 可重新开聊
+6. v1 全部既有功能回归通过；ctest 全绿 + test_api.ps1 全绿
