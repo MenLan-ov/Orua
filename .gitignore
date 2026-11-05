@@ -3,6 +3,7 @@ bin/
 obj/
 .vs/
 backend/build/
+dist/
 # 运行时数据
 data/
 data_e2e/
