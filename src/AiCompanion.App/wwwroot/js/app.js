@@ -565,6 +565,7 @@ function renderBotDetail() {
   const detail = $('bot-detail');
   if (!b) { detail.classList.add('hidden'); return; }
   detail.classList.remove('hidden');
+  $('btn-bot-delete').classList.toggle('hidden', b.id === App.state.defaultBotId);
   $('bot-detail-avatar').textContent = b.avatar;
   $('bot-detail-name').textContent = b.name + (b.id === App.state.defaultBotId ? '（默认）' : '');
   $('bot-detail-sub').textContent = b.is_enabled ? '已启用' : '已停用';
@@ -808,6 +809,8 @@ function handleGroupEvent(ev, obj) {
     updateGroupControls();
     if (obj.state === 'idle' && prev !== 'idle') addGroupNote('群聊已停止');
   } else if (ev === 'turn_start') {
+    App.state.groupTurn = obj.turn || App.state.groupTurn;
+    updateGroupControls();
     ensureTyper(obj);
   } else if (ev === 'delta') {
     const t = ensureTyper(obj);
@@ -1050,7 +1053,7 @@ function backendOnline(online) {
 }
 
 App.registerCommand('backend-status', (p) => {
-  backendOnline(p && p.online);
+  backendOnline(p && p.status === 'up');
 });
 
 App.registerCommand('boot', async () => {
@@ -1130,6 +1133,10 @@ $('btn-switch-bot').addEventListener('click', () => App.run('switch-session-bot'
 $('btn-bot-edit').addEventListener('click', () => {
   const b = App.state.bots.find((x) => x.id === App.state.selectedBotId);
   if (b) App.run('open-bot-editor', b);
+});
+$('btn-bot-delete').addEventListener('click', () => {
+  const b = App.state.bots.find((x) => x.id === App.state.selectedBotId);
+  if (b) App.run('delete-bot', b.id);
 });
 $('btn-settings-save').addEventListener('click', () => App.run('save-settings'));
 $('btn-settings-cancel').addEventListener('click', () => $('modal-settings').classList.add('hidden'));
