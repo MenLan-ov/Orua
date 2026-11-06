@@ -1171,7 +1171,7 @@ function ctxItemEl(label, onClick, opts = {}) {
   const el = document.createElement('div');
   el.className = 'ctx-item' + (opts.danger ? ' danger' : '');
   el.innerHTML = `<span>${opts.icon || '·'}</span><span>${escapeHtml(label)}</span>`;
-  el.onclick = () => { closeContextMenus(); onClick(); };
+  el.onclick = (ev) => { ev.stopPropagation(); closeContextMenus(); onClick(); };
   return el;
 }
 function ctxSepEl() {
@@ -1195,7 +1195,7 @@ App.registerCommand('open-context-menu', (kind, id, x, y) => {
     renderChatList();
   };
   const markUnread = async () => {
-    delete App.state.reads[`${kind}:${id}`];
+    App.state.reads[`${kind}:${id}`] = '1970-01-01T00:00:00Z';
     await saveReads();
     renderChatList();
   };
