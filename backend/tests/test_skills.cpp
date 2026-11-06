@@ -40,6 +40,25 @@ TEST_CASE("skills: bot_skills 全量覆盖") {
   std::filesystem::remove(path);
 }
 
+TEST_CASE("skills: setBotSkills 事务回滚——重复 skill_id 抛异常且不半覆盖") {
+  auto path = tmpDb("ac_v4_skills_tx.db");
+  REQUIRE(db::open(path.string()));
+  auto b = db::createBot(db::Bot{0, "测试", "🤖", "", "人设"});
+
+  db::setBotSkills(b.id, {{"calculator", true}});
+
+  // 重复 skill_id 违反 UNIQUE(bot_id, skill_id)，事务应回滚，旧技能集保持不变
+  CHECK_THROWS(db::setBotSkills(b.id, {{"datetime", true}, {"datetime", false}}));
+
+  auto list = db::listBotSkills(b.id);
+  REQUIRE(list.size() == 1);
+  CHECK(list[0].skill_id == "calculator");
+  CHECK(list[0].enabled);
+
+  db::close();
+  std::filesystem::remove(path);
+}
+
 TEST_CASE("skills: reminders CRUD 与到期过滤") {
   auto path = tmpDb("ac_v4_reminders.db");
   REQUIRE(db::open(path.string()));

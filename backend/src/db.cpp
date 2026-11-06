@@ -750,11 +750,18 @@ void setBotSkills(int64_t botId,
                   const std::vector<std::pair<std::string, bool>>& skills) {
   std::lock_guard<std::recursive_mutex> lock(g_mtx);
   std::string ts = nowIso();
-  execute("DELETE FROM bot_skills WHERE bot_id=?", {std::to_string(botId)});
-  for (auto& [sid, on] : skills) {
-    execute("INSERT INTO bot_skills(bot_id,skill_id,enabled,params,created_at,updated_at) "
-            "VALUES(?,?,?,?,?,?)",
-            {std::to_string(botId), sid, on ? "1" : "0", "{}", ts, ts});
+  exec("BEGIN IMMEDIATE");
+  try {
+    execute("DELETE FROM bot_skills WHERE bot_id=?", {std::to_string(botId)});
+    for (auto& [sid, on] : skills) {
+      execute("INSERT INTO bot_skills(bot_id,skill_id,enabled,params,created_at,updated_at) "
+              "VALUES(?,?,?,?,?,?)",
+              {std::to_string(botId), sid, on ? "1" : "0", "{}", ts, ts});
+    }
+    exec("COMMIT");
+  } catch (...) {
+    exec("ROLLBACK");
+    throw;
   }
 }
 
