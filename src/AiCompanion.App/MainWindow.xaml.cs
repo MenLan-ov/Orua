@@ -2,6 +2,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Interop;
 using Microsoft.Web.WebView2.Core;
@@ -10,6 +11,8 @@ namespace AiCompanion.App;
 
 public partial class MainWindow : Window
 {
+    private const string DetachTargetPattern = @"\A(session|group):\d+\z";
+
     private BackendProcess? _backend;
     private readonly Dictionary<string, ChatWindow> _detached = new();
 
@@ -75,7 +78,11 @@ public partial class MainWindow : Window
         try
         {
             Dispatcher.Invoke(() =>
-                WebView.CoreWebView2?.PostWebMessageAsJson(JsonSerializer.Serialize(msg)));
+            {
+                var json = JsonSerializer.Serialize(msg);
+                WebView.CoreWebView2?.PostWebMessageAsJson(json);
+                foreach (var w in _detached.Values.ToList()) w.PostToWeb(json);
+            });
         }
         catch { }
     }
@@ -118,6 +125,7 @@ public partial class MainWindow : Window
                             var target = doc.RootElement.GetProperty("payload")
                                 .GetProperty("target").GetString();
                             if (string.IsNullOrEmpty(target)) break;
+                            if (!Regex.IsMatch(target, DetachTargetPattern)) break;
                             if (_detached.TryGetValue(target, out var existing)) {
                                 existing.Activate();
                                 break;

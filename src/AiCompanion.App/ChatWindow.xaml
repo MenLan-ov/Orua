@@ -7,7 +7,7 @@
         Height="700" Width="900" MinHeight="480" MinWidth="560"
         Background="#0f172a"
         Loaded="OnLoaded">
-    <Grid>
+    <Grid x:Name="Root">
         <wv2:WebView2 x:Name="WebView" />
     </Grid>
 </Window>

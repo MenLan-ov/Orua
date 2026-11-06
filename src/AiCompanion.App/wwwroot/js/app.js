@@ -1390,9 +1390,28 @@ App.registerCommand('boot', async () => {
     if (target.startsWith('session:')) App.state.detachedTarget = { kind: 'session', id: Number(target.slice(8)) };
     else if (target.startsWith('group:')) App.state.detachedTarget = { kind: 'group', id: Number(target.slice(6)) };
     // 独立窗口轮询：3s 拉最新消息（单聊）
+    let seenKey = null;
+    let polling = false;
     setInterval(async () => {
-      if (App.state.detachedTarget?.kind === 'session' && App.state.currentSessionId) {
-        await loadMessages(App.state.currentSessionId);
+      if (App.state.detachedTarget?.kind !== 'session' || !App.state.currentSessionId) return;
+      if (App.state.streaming || polling) return;
+      const sid = App.state.currentSessionId;
+      polling = true;
+      try {
+        const msgs = await App.api.get(`/api/v1/messages?session_id=${sid}&limit=100`);
+        if (App.state.currentSessionId !== sid) return;
+        const key = `${msgs.length}:${msgs.length ? msgs[0].id : 0}`;
+        if (key === seenKey) return;
+        // boot 的 select-session 已经画过一遍：首 tick 只记基线，别为此重绘一次气泡
+        if (seenKey === null && messagesEl.childElementCount > 0) { seenKey = key; return; }
+        const stick = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 40;
+        const top = messagesEl.scrollTop;
+        await loadMessages(sid);
+        seenKey = key;
+        if (!stick) messagesEl.scrollTop = top;
+      } catch (_) {
+      } finally {
+        polling = false;
       }
     }, 3000);
   }
@@ -1409,18 +1428,21 @@ App.registerCommand('boot', async () => {
   } catch (_) {
     backendOnline(false);
   }
-  const last = App.state.sessions[0];
-  if (last) App.run('select-session', last.id);
-  else {
-    $('messages').classList.add('hidden');
-    $('composer').classList.add('hidden');
-    $('chat-empty').classList.remove('hidden');
+  if (!App.state.detached) {
+    const last = App.state.sessions[0];
+    if (last) App.run('select-session', last.id);
+    else {
+      $('messages').classList.add('hidden');
+      $('composer').classList.add('hidden');
+      $('chat-empty').classList.remove('hidden');
+    }
   }
   if (App.state.detached) {
     if (App.state.detachedTarget?.kind === 'session') {
       App.run('select-session', App.state.detachedTarget.id);
     } else if (App.state.detachedTarget?.kind === 'group') {
       App.run('open-group-room', App.state.detachedTarget.id);
+      switchView('messages');
     }
   }
 });

@@ -1,6 +1,8 @@
 using System.IO;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media;
 using Microsoft.Web.WebView2.Core;
 
 namespace AiCompanion.App;
@@ -24,7 +26,35 @@ public partial class ChatWindow : Window
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
-        await InitWebViewAsync();
+        try
+        {
+            await InitWebViewAsync();
+        }
+        catch (Exception ex)
+        {
+            Title = "聊天窗口初始化失败";
+            ShowFailure(ex.Message);
+        }
+    }
+
+    private void ShowFailure(string detail)
+    {
+        WebView.Visibility = Visibility.Collapsed;
+        Root.Children.Add(new TextBlock
+        {
+            Text = "聊天窗口初始化失败：Web 视图无法启动。\n" + detail,
+            Foreground = Brushes.White,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(28),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        });
+    }
+
+    internal void PostToWeb(string json)
+    {
+        try { WebView.CoreWebView2?.PostWebMessageAsJson(json); }
+        catch { }
     }
 
     private async Task InitWebViewAsync()
@@ -36,7 +66,7 @@ public partial class ChatWindow : Window
             "app.local", WwwrootDir, CoreWebView2HostResourceAccessKind.Allow);
         await WebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
             $"window.__API_BASE__ = 'http://127.0.0.1:{_apiPort}';" +
-            $"window.__DETACH_TARGET__ = '{_target}';");
+            $"window.__DETACH_TARGET__ = {JsonSerializer.Serialize(_target)};");
         WebView.CoreWebView2.Navigate(
             "https://app.local/index.html?window=detached&target=" +
             System.Uri.EscapeDataString(_target));
