@@ -1,10 +1,13 @@
 #include "server.h"
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <ctime>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -64,6 +67,9 @@ json botToJson(const db::Bot& b) {
           {"api_base_url", b.api_base_url},
           {"api_key", masked},
           {"api_model", b.api_model},
+          {"max_tokens", b.max_tokens},
+          {"api_type", b.api_type},
+          {"avatar_url", b.avatar_path.empty() ? json(nullptr) : json(b.avatar_path)},
           {"created_at", b.created_at},
           {"updated_at", b.updated_at}};
 }
@@ -110,16 +116,19 @@ json memberToJson(const db::GroupMember& m) {
           {"name", name},
           {"avatar", avatar},
           {"position", m.position},
+          {"avatar_url", bot && !bot->avatar_path.empty() ? json(bot->avatar_path) : json(nullptr)},
           {"is_enabled", enabled}};
 }
 
 json groupMessageToJson(const db::GroupMessage& m) {
   std::string name = "用户", avatar = "🙋";
+  json avatarUrl = nullptr;
   if (m.bot_id > 0) {
     auto bot = db::getBot(m.bot_id);
     if (bot) {
       name = bot->name;
       avatar = bot->avatar;
+      avatarUrl = bot->avatar_path.empty() ? json(nullptr) : json(bot->avatar_path);
     } else {
       name = "已删除";
       avatar = "❓";
@@ -130,9 +139,46 @@ json groupMessageToJson(const db::GroupMessage& m) {
           {"bot_id", m.bot_id},
           {"name", name},
           {"avatar", avatar},
+          {"avatar_url", avatarUrl},
           {"role", m.role},
           {"content", m.content},
           {"created_at", m.created_at}};
+}
+
+// 标准 base64 解码（头像上传用），返回空串表示解码失败
+std::string b64Decode(const std::string& in) {
+  static const std::string tbl =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string out;
+  int val = 0, bits = -8;
+  for (unsigned char c : in) {
+    if (std::isspace(c) || c == '=') continue;
+    size_t pos = tbl.find(static_cast<char>(c));
+    if (pos == std::string::npos) return "";
+    val = (val << 6) | static_cast<int>(pos);
+    bits += 6;
+    if (bits >= 0) {
+      out.push_back(static_cast<char>((val >> bits) & 0xFF));
+      bits -= 8;
+    }
+  }
+  return out;
+}
+
+json memoryToJson(const db::Memory& m) {
+  json sid = nullptr;
+  if (m.scope == "private" && m.source_msg_id > 0)
+    if (auto s = db::memorySourceSession(m.source_msg_id)) sid = *s;
+  return {{"id", m.id},
+          {"bot_id", m.bot_id},
+          {"scope", m.scope},
+          {"group_id", m.group_id == 0 ? json(nullptr) : json(m.group_id)},
+          {"content", m.content},
+          {"tags", m.tags},
+          {"source_msg_id", m.source_msg_id == 0 ? json(nullptr) : json(m.source_msg_id)},
+          {"source_session_id", sid},
+          {"created_at", m.created_at},
+          {"updated_at", m.updated_at}};
 }
 
 /* ---------- 机器人配置解析 ---------- */
@@ -454,6 +500,12 @@ void registerBotRoutes(httplib::Server& svr) {
     bot.temperature = b.value("temperature", 0.8);
     bot.api_base_url = b.value("api_base_url", "");
     bot.api_model = b.value("api_model", "");
+    bot.max_tokens = b.value("max_tokens", 2048);
+    bot.api_type = b.value("api_type", "openai");
+    if (bot.api_type != "openai") {
+      fail(res, 400, 400, "api_type 仅支持 openai");
+      return;
+    }
     std::string key = b.value("api_key", "");
     if (!key.empty()) bot.api_key_enc = dpapi::protect(key);
     bot = db::createBot(bot);
@@ -476,6 +528,15 @@ void registerBotRoutes(httplib::Server& svr) {
     if (b.contains("temperature")) bot->temperature = b["temperature"].get<double>();
     if (b.contains("api_base_url")) bot->api_base_url = b["api_base_url"].get<std::string>();
     if (b.contains("api_model")) bot->api_model = b["api_model"].get<std::string>();
+    if (b.contains("max_tokens")) bot->max_tokens = b["max_tokens"].get<int>();
+    if (b.contains("api_type")) {
+      bot->api_type = b["api_type"].get<std::string>();
+      if (bot->api_type != "openai") {
+        fail(res, 400, 400, "api_type 仅支持 openai");
+        return;
+      }
+    }
+    if (b.contains("avatar_path")) bot->avatar_path = b["avatar_path"].get<std::string>();
     if (b.contains("api_key")) {
       // 空串 = 清除覆盖，不传 = 不变
       std::string key = b["api_key"].get<std::string>();
@@ -727,6 +788,116 @@ void registerGroupRoutes(httplib::Server& svr) {
   });
 }
 
+/* ---------- 记忆路由（v3） ---------- */
+
+void registerMemoryRoutes(httplib::Server& svr) {
+  svr.Get(R"(/api/v1/bots/(\d+)/memories)", [](const httplib::Request& req, httplib::Response& res) {
+    int64_t id = std::stoll(req.matches[1].str());
+    if (!db::getBot(id)) {
+      fail(res, 404, 404, "Bot 不存在");
+      return;
+    }
+    std::string scope = req.get_param_value("scope");
+    if (!scope.empty() && scope != "private" && scope != "group") {
+      fail(res, 400, 400, "scope 非法");
+      return;
+    }
+    int64_t groupId = -1;
+    std::string gs = req.get_param_value("group_id");
+    if (!gs.empty()) {
+      try {
+        groupId = std::stoll(gs);
+      } catch (...) {
+        fail(res, 400, 400, "group_id 非法");
+        return;
+      }
+    }
+    std::string q = req.get_param_value("q");
+    json arr = json::array();
+    for (auto& m : db::listMemories(id, scope, groupId, q))
+      arr.push_back(memoryToJson(m));
+    res.set_content(okJson(json{{"memories", arr}}).dump(), "application/json; charset=utf-8");
+  });
+
+  svr.Put(R"(/api/v1/bots/(\d+)/memories/(\d+))", [](const httplib::Request& req, httplib::Response& res) {
+    int64_t id = std::stoll(req.matches[1].str());
+    int64_t memId = std::stoll(req.matches[2].str());
+    if (!db::getBot(id)) {
+      fail(res, 404, 404, "Bot 不存在");
+      return;
+    }
+    json b = parseBody(req, res);
+    if (res.status == 400) return;
+    std::string content = b.value("content", "");
+    if (content.empty()) {
+      fail(res, 400, 400, "记忆内容为空");
+      return;
+    }
+    if (!db::updateMemoryContent(memId, content)) {
+      fail(res, 404, 404, "记忆不存在");
+      return;
+    }
+    res.set_content(okJson(json::object()).dump(), "application/json; charset=utf-8");
+  });
+
+  svr.Delete(R"(/api/v1/bots/(\d+)/memories/(\d+))", [](const httplib::Request& req, httplib::Response& res) {
+    int64_t id = std::stoll(req.matches[1].str());
+    int64_t memId = std::stoll(req.matches[2].str());
+    if (!db::getBot(id)) {
+      fail(res, 404, 404, "Bot 不存在");
+      return;
+    }
+    if (!db::deleteMemory(memId)) {
+      fail(res, 404, 404, "记忆不存在");
+      return;
+    }
+    res.set_content(okJson(json::object()).dump(), "application/json; charset=utf-8");
+  });
+
+  svr.Post(R"(/api/v1/bots/(\d+)/avatar)", [](const httplib::Request& req, httplib::Response& res) {
+    int64_t id = std::stoll(req.matches[1].str());
+    auto bot = db::getBot(id);
+    if (!bot) {
+      fail(res, 404, 404, "Bot 不存在");
+      return;
+    }
+    json b = parseBody(req, res);
+    if (res.status == 400) return;
+    std::string raw = b64Decode(b.value("image_base64", ""));
+    if (raw.empty() || raw.size() > 256 * 1024) {
+      fail(res, 400, 400, "头像图片无效或超过 256KB");
+      return;
+    }
+    std::string upDir = db::dataDir() + "/uploads";
+    std::error_code ec;
+    std::filesystem::create_directories(upDir, ec);
+    std::string rel = "uploads/" + std::to_string(id) + ".png";
+    {
+      std::ofstream ofs(db::dataDir() + "/" + rel, std::ios::binary);
+      ofs.write(raw.data(), static_cast<std::streamsize>(raw.size()));
+    }
+    bot->avatar_path = rel;
+    db::updateBot(*bot);
+    res.set_content(okJson(json{{"avatar_url", rel}}).dump(), "application/json; charset=utf-8");
+  });
+
+  svr.Get(R"(/api/v1/bots/(\d+)/avatar)", [](const httplib::Request& req, httplib::Response& res) {
+    int64_t id = std::stoll(req.matches[1].str());
+    auto bot = db::getBot(id);
+    if (!bot || bot->avatar_path.empty()) {
+      fail(res, 404, 404, "头像不存在");
+      return;
+    }
+    std::ifstream ifs(db::dataDir() + "/" + bot->avatar_path, std::ios::binary);
+    if (!ifs) {
+      fail(res, 404, 404, "头像文件缺失");
+      return;
+    }
+    std::string bytes((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    res.set_content(bytes, "image/png");
+  });
+}
+
 /* ---------- 配置路由（与 v1 完全一致，原样保留） ---------- */
 
 void registerConfigRoutes(httplib::Server& svr) {
@@ -747,7 +918,8 @@ void registerConfigRoutes(httplib::Server& svr) {
                  {"theme", db::getSetting("theme").value_or("dark")},
                  {"proxy_enabled", db::getSetting("proxy_enabled").value_or("0")},
                  {"proxy_host", db::getSetting("proxy_host").value_or("")},
-                 {"proxy_port", db::getSetting("proxy_port").value_or("0")}};
+                 {"proxy_port", db::getSetting("proxy_port").value_or("0")},
+                 {"memory_extraction", db::getSetting("memory_extraction").value_or("1")}};
     res.set_content(okJson(data).dump(), "application/json; charset=utf-8");
   });
 
@@ -765,6 +937,9 @@ void registerConfigRoutes(httplib::Server& svr) {
     if (b.contains("proxy_enabled")) db::setSetting("proxy_enabled", b["proxy_enabled"].get<bool>() ? "1" : "0");
     if (b.contains("proxy_host")) db::setSetting("proxy_host", b["proxy_host"].get<std::string>());
     if (b.contains("proxy_port")) db::setSetting("proxy_port", std::to_string(b["proxy_port"].get<int>()));
+    if (b.contains("memory_extraction"))
+      db::setSetting("memory_extraction",
+                     b["memory_extraction"].get<std::string>() == "1" ? "1" : "0");
     res.set_content(okJson(json::object()).dump(), "application/json; charset=utf-8");
   });
 }
@@ -936,6 +1111,7 @@ void registerRoutes(httplib::Server& svr, const std::string& staticDir) {
     res.set_content("{\"status\":\"ok\",\"version\":\"2.0.0\"}", "application/json; charset=utf-8");
   });
 
+  registerMemoryRoutes(svr);
   registerConfigRoutes(svr);
   registerBotRoutes(svr);
   registerGroupRoutes(svr);

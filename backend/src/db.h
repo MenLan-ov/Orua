@@ -107,6 +107,7 @@ bool updateMemoryContent(int64_t id, const std::string& content);
 bool deleteMemory(int64_t id);
 std::vector<Memory> listMemories(int64_t botId, const std::string& scope = "",
                                  int64_t groupId = -1, const std::string& q = "");
+std::optional<int64_t> memorySourceSession(int64_t msgId);   // messages.id → session_id（私聊记忆来源）
 void deleteMemoriesByBot(int64_t botId);
 void deleteMemoriesByGroup(int64_t groupId);
 std::string dataDir();

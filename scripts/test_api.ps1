@@ -126,6 +126,48 @@ Invoke-RestMethod "$base/api/v1/groups/$gid" -Method Delete | Out-Null
 $gl = Invoke-RestMethod "$base/api/v1/groups"
 Assert-True (($gl.data | Where-Object id -eq $gid) -eq $null) 'group delete'
 
+# ---- v3: 记忆与头像 ----
+$memEmpty = Invoke-RestMethod "$base/api/v1/bots/$botId/memories?scope=private"
+Assert-True ($memEmpty.code -eq 0) 'memories list code'
+Assert-True ($memEmpty.data.memories.Count -eq 0) 'memories empty before private chat'
+$mem404b = Invoke-ExpectError 'Get' "$base/api/v1/bots/999999999/memories" $null
+Assert-True ($mem404b.Status -eq 404) 'memories nonexistent bot 404'
+$mem404 = Invoke-ExpectError 'Delete' "$base/api/v1/bots/$botId/memories/999999999" $null
+Assert-True ($mem404.Status -eq 404) 'delete nonexistent memory 404'
+$memBad = Invoke-ExpectError 'Put' "$base/api/v1/bots/$botId/memories/999999999" @{ content = 'x' }
+Assert-True ($memBad.Status -eq 404) 'put nonexistent memory 404'
+
+# 头像上传（1x1 PNG base64）→ 落盘 + avatar_url 回显
+$png1x1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+$av = Invoke-Json 'Post' "$base/api/v1/bots/$botId/avatar" @{ image_base64 = $png1x1 }
+Assert-True ($av.code -eq 0) 'avatar upload'
+Assert-True ($av.data.avatar_url -match '^uploads/') "avatar_url=$($av.data.avatar_url)"
+$bl3 = Invoke-RestMethod "$base/api/v1/bots"
+$b3 = $bl3.data.bots | Where-Object id -eq $botId
+Assert-True ($b3.avatar_url -match '^uploads/') 'bot list avatar_url'
+$avBytes = & curl.exe -s --max-time 5 "$base/api/v1/bots/$botId/avatar"
+Assert-True ($avBytes.Length -gt 0) 'avatar bytes served'
+$avBad = Invoke-ExpectError 'Post' "$base/api/v1/bots/$botId/avatar" @{ image_base64 = 'not-base64!!!' }
+Assert-True ($avBad.Status -eq 400) 'avatar bad base64 400'
+
+# bot 新字段回显
+$bn = Invoke-Json 'Post' "$base/api/v1/bots" @{ name = '字段Bot'; avatar = '🤖'; greeting = ''; system_prompt = '人设'; temperature = 0.8; api_base_url = ''; api_key = ''; api_model = ''; max_tokens = 4096; api_type = 'openai' }
+Assert-True ($bn.code -eq 0) 'bot create with v3 fields'
+Assert-True ($bn.data.max_tokens -eq 4096) 'bot max_tokens echo'
+Assert-True ($bn.data.api_type -eq 'openai') 'bot api_type echo'
+$bnId = [int64]$bn.data.id
+$bp = Invoke-Json 'Patch' "$base/api/v1/bots/$bnId" @{ max_tokens = 1024 }
+Assert-True ($bp.data.max_tokens -eq 1024) 'bot patch max_tokens'
+$bt = Invoke-ExpectError 'Post' "$base/api/v1/bots" @{ name = '坏类型'; system_prompt = 'x'; api_type = 'anthropic' }
+Assert-True ($bt.Status -eq 400) 'bad api_type 400'
+Invoke-RestMethod "$base/api/v1/bots/$bnId" -Method Delete | Out-Null
+
+# config 新键
+Invoke-Json 'Post' "$base/api/v1/config" @{ memory_extraction = '0' } | Out-Null
+$cfg3 = Invoke-RestMethod "$base/api/v1/config"
+Assert-True ($cfg3.data.memory_extraction -eq '0') 'config memory_extraction roundtrip'
+Invoke-Json 'Post' "$base/api/v1/config" @{ memory_extraction = '1' } | Out-Null
+
 # 不存在的群：messages / stream 子资源应 404
 $gm404 = Invoke-ExpectError 'Get' "$base/api/v1/groups/999999999/messages" $null
 Assert-True ($gm404.Status -eq 404) 'messages nonexistent group 404'

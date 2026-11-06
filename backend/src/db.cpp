@@ -696,4 +696,12 @@ void deleteMemoriesByGroup(int64_t groupId) {
 
 std::string dataDir() { return g_dataDir; }
 
+std::optional<int64_t> memorySourceSession(int64_t msgId) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  std::optional<int64_t> out;
+  query("SELECT session_id FROM messages WHERE id=?", {std::to_string(msgId)},
+        [&](sqlite3_stmt* st) { out = colInt(st, 0); });
+  return out;
+}
+
 }  // namespace db
