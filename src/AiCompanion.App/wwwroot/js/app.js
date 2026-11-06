@@ -1554,6 +1554,34 @@ App.registerCommand('backend-status', (p) => {
   backendOnline(p && p.status === 'up');
 });
 
+/* 提醒到期提示：仅主窗口轮询，toast 走 textContent 渲染，故直接传原文不做转义 */
+const REMINDER_POLL_MS = 15000;
+const remindersSurfaced = new Set();
+let reminderPolling = false;
+let reminderTimer = null;
+async function reminderTick() {
+  if (reminderPolling) return;
+  reminderPolling = true;
+  try {
+    const res = await App.api.get('/api/v1/reminders?due=1');
+    for (const r of (res && res.reminders) || []) {
+      if (remindersSurfaced.has(r.id)) continue;
+      // 先记账再提示：POST done 失败也只是本次会话不再重复提示，绝不死循环刷屏
+      remindersSurfaced.add(r.id);
+      const bot = App.state.bots.find((b) => b.id === r.bot_id);
+      toast(bot ? `${bot.name}提醒你：${r.content}` : `提醒你：${r.content}`);
+      try { await App.api.post(`/api/v1/reminders/${r.id}/done`); } catch (_) {}
+    }
+  } catch (_) {
+  } finally {
+    reminderPolling = false;
+  }
+}
+function startReminderPoll() {
+  if (App.state.detached || reminderTimer) return;
+  reminderTimer = setInterval(reminderTick, REMINDER_POLL_MS);
+}
+
 App.registerCommand('boot', async () => {
   const params = new URLSearchParams(location.search);
   App.state.detached = params.get('window') === 'detached';
@@ -1609,6 +1637,7 @@ App.registerCommand('boot', async () => {
     backendOnline(false);
   }
   if (!App.state.detached) {
+    startReminderPoll();
     const last = App.state.sessions[0];
     if (last) App.run('select-session', last.id);
     else {
