@@ -102,6 +102,25 @@ CREATE TABLE IF NOT EXISTS bot_memories (
 );
 CREATE INDEX IF NOT EXISTS idx_mem_bot ON bot_memories(bot_id, scope);
 CREATE INDEX IF NOT EXISTS idx_mem_group ON bot_memories(bot_id, group_id);
+CREATE TABLE IF NOT EXISTS bot_skills (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_id INTEGER NOT NULL,
+  skill_id TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  params TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(bot_id, skill_id)
+);
+CREATE TABLE IF NOT EXISTS reminders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_id INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  due_at TEXT NOT NULL,
+  done INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(done, due_at);
 )SQL";
 
 std::string colText(sqlite3_stmt* st, int i) {
@@ -186,6 +205,27 @@ Memory rowToMemory(sqlite3_stmt* st) {
   m.created_at = colText(st, 7);
   m.updated_at = colText(st, 8);
   return m;
+}
+BotSkill rowToSkill(sqlite3_stmt* st) {
+  BotSkill s;
+  s.id = colInt(st, 0);
+  s.bot_id = colInt(st, 1);
+  s.skill_id = colText(st, 2);
+  s.enabled = colInt(st, 3) != 0;
+  s.params = colText(st, 4);
+  s.created_at = colText(st, 5);
+  s.updated_at = colText(st, 6);
+  return s;
+}
+Reminder rowToReminder(sqlite3_stmt* st) {
+  Reminder r;
+  r.id = colInt(st, 0);
+  r.bot_id = colInt(st, 1);
+  r.content = colText(st, 2);
+  r.due_at = colText(st, 3);
+  r.done = colInt(st, 4) != 0;
+  r.created_at = colText(st, 5);
+  return r;
 }
 
 }  // namespace
@@ -410,6 +450,8 @@ bool deleteBot(int64_t id) {
   execute("DELETE FROM group_members WHERE bot_id=?", {std::to_string(id)});
   execute("DELETE FROM bots WHERE id=?", {std::to_string(id)});
   deleteMemoriesByBot(id);
+  execute("DELETE FROM bot_skills WHERE bot_id=?", {std::to_string(id)});
+  execute("DELETE FROM reminders WHERE bot_id=?", {std::to_string(id)});
   return true;
 }
 
@@ -702,6 +744,65 @@ std::optional<int64_t> memorySourceSession(int64_t msgId) {
   query("SELECT session_id FROM messages WHERE id=?", {std::to_string(msgId)},
         [&](sqlite3_stmt* st) { out = colInt(st, 0); });
   return out;
+}
+
+void setBotSkills(int64_t botId,
+                  const std::vector<std::pair<std::string, bool>>& skills) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  std::string ts = nowIso();
+  execute("DELETE FROM bot_skills WHERE bot_id=?", {std::to_string(botId)});
+  for (auto& [sid, on] : skills) {
+    execute("INSERT INTO bot_skills(bot_id,skill_id,enabled,params,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?)",
+            {std::to_string(botId), sid, on ? "1" : "0", "{}", ts, ts});
+  }
+}
+
+std::vector<BotSkill> listBotSkills(int64_t botId) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  std::vector<BotSkill> out;
+  query("SELECT id,bot_id,skill_id,enabled,params,created_at,updated_at "
+        "FROM bot_skills WHERE bot_id=? ORDER BY id ASC",
+        {std::to_string(botId)},
+        [&](sqlite3_stmt* st) { out.push_back(rowToSkill(st)); });
+  return out;
+}
+
+Reminder addReminder(int64_t botId, const std::string& content,
+                     const std::string& dueAt) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  std::string ts = nowIso();
+  execute("INSERT INTO reminders(bot_id,content,due_at,done,created_at) VALUES(?,?,?,0,?)",
+          {std::to_string(botId), content, dueAt, ts});
+  Reminder r;
+  r.id = sqlite3_last_insert_rowid(g_db);
+  r.bot_id = botId;
+  r.content = content;
+  r.due_at = dueAt;
+  r.done = false;
+  r.created_at = ts;
+  return r;
+}
+
+std::vector<Reminder> listReminders(bool dueOnly) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  std::vector<Reminder> out;
+  std::string sql = "SELECT id,bot_id,content,due_at,done,created_at FROM reminders";
+  if (dueOnly) {
+    sql += " WHERE done=0 AND due_at <= ? ORDER BY due_at ASC";
+    query(sql.c_str(), {nowIso()},
+          [&](sqlite3_stmt* st) { out.push_back(rowToReminder(st)); });
+  } else {
+    sql += " ORDER BY due_at ASC";
+    query(sql.c_str(), {}, [&](sqlite3_stmt* st) { out.push_back(rowToReminder(st)); });
+  }
+  return out;
+}
+
+bool markReminderDone(int64_t id) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  execute("UPDATE reminders SET done=1 WHERE id=?", {std::to_string(id)});
+  return sqlite3_changes(g_db) > 0;
 }
 
 }  // namespace db

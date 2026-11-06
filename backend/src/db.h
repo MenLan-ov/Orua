@@ -73,6 +73,23 @@ struct Memory {
   std::string created_at;
   std::string updated_at;
 };
+struct BotSkill {
+  int64_t id = 0;
+  int64_t bot_id = 0;
+  std::string skill_id;
+  bool enabled = true;
+  std::string params = "{}";
+  std::string created_at;
+  std::string updated_at;
+};
+struct Reminder {
+  int64_t id = 0;
+  int64_t bot_id = 0;
+  std::string content;
+  std::string due_at;
+  bool done = false;
+  std::string created_at;
+};
 
 bool open(const std::string& dbPath);
 void close();
@@ -107,6 +124,13 @@ bool updateMemoryContent(int64_t id, const std::string& content);
 bool deleteMemory(int64_t id);
 std::vector<Memory> listMemories(int64_t botId, const std::string& scope = "",
                                  int64_t groupId = -1, const std::string& q = "");
+void setBotSkills(int64_t botId,
+                  const std::vector<std::pair<std::string, bool>>& skills);
+std::vector<BotSkill> listBotSkills(int64_t botId);
+Reminder addReminder(int64_t botId, const std::string& content,
+                     const std::string& dueAt);
+std::vector<Reminder> listReminders(bool dueOnly);
+bool markReminderDone(int64_t id);
 std::optional<int64_t> memorySourceSession(int64_t msgId);   // messages.id → session_id（私聊记忆来源）
 void deleteMemoriesByBot(int64_t botId);
 void deleteMemoriesByGroup(int64_t groupId);
