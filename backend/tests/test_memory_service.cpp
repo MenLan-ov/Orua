@@ -50,6 +50,25 @@ TEST_CASE("memory_service: LLM_MOCK 提取两条固定记忆") {
   std::filesystem::remove(path);
 }
 
+TEST_CASE("memory_service: 提取携带来源消息 id（source_msg_id 链接）") {
+  _putenv_s("LLM_MOCK", "1");
+  auto path = tmpDb("ac_v3_ms_source.db");
+  REQUIRE(db::open(path.string()));
+  auto b = db::createBot(db::Bot{0, "测试", "🤖", "", "人设"});
+
+  mem::MemoryService::instance().enqueueExtract(
+      b.id, "private", 0, "用户：我喜欢喝咖啡\n助手：好的我记住了", 77);
+  waitUntil([&] { return db::listMemories(b.id).size() >= 2; });
+
+  bool linked = false;
+  for (auto& m : db::listMemories(b.id))
+    if (m.source_msg_id == 77) linked = true;
+  CHECK(linked);
+
+  db::close();
+  std::filesystem::remove(path);
+}
+
 TEST_CASE("memory_service: group scope 提取落 (bot,group) 维度") {
   _putenv_s("LLM_MOCK", "1");
   auto path = tmpDb("ac_v3_ms_group.db");

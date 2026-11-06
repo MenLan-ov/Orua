@@ -17,6 +17,7 @@ struct ExtractJob {
   std::string scope;   // "private" | "group"
   int64_t group_id = 0;
   std::string dialogue;
+  int64_t source_msg_id = 0;   // 私聊：助手回复消息 id（来源链接）
 };
 
 // 提取：异步、worker 串行、失败重试一次后放弃；LLM_MOCK 固定两条占位记忆。
@@ -26,7 +27,7 @@ class MemoryService {
   static MemoryService& instance();
 
   void enqueueExtract(int64_t botId, const std::string& scope, int64_t groupId,
-                      const std::string& dialogue);
+                      const std::string& dialogue, int64_t sourceMsgId = 0);
   std::vector<db::Memory> pickMemories(int64_t botId, const std::string& scope,
                                        int64_t groupId, const std::string& dialogue,
                                        int maxK);

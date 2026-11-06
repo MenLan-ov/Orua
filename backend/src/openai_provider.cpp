@@ -98,6 +98,7 @@ std::string buildBody(const ChatRequest& req) {
   for (auto& m : req.messages)
     body["messages"].push_back({{"role", m.role}, {"content", m.content}});
   if (req.temperature > 0) body["temperature"] = req.temperature;
+  if (req.max_tokens > 0) body["max_tokens"] = req.max_tokens;
   return body.dump();
 }
 

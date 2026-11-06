@@ -227,6 +227,7 @@ for ($i = 0; $i -lt 20; $i++) {
 Assert-True ($null -ne $memGot) 'private memories extracted after chat'
 Assert-True (@($memGot.data.memories | Where-Object { $_.scope -eq 'private' }).Count -ge 2) 'private scope memories'
 Assert-True (($memGot.data.memories | Where-Object { $_.content -match '咖啡' }) -ne $null) 'coffee memory present'
+Assert-True (($memGot.data.memories | Where-Object { $_.source_session_id -eq $sid -and $_.source_msg_id -ne $null }) -ne $null) 'private memory source session linked'
 
 # 开关关闭后不再新增
 Invoke-Json 'Post' "$base/api/v1/config" @{ memory_extraction = '0' } | Out-Null

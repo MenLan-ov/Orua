@@ -13,6 +13,7 @@ struct ChatMsg {
 struct ChatRequest {
   std::vector<ChatMsg> messages;
   double temperature = 0.8;
+  int max_tokens = 0;
   std::string base_url;    // 如 https://api.deepseek.com/v1
   std::string api_key;
   std::string model;

@@ -214,6 +214,7 @@ struct BotConfig {
   std::string api_key;
   std::string model;
   double temperature = 0.8;
+  int max_tokens = 0;
 };
 
 // 覆盖项为空 = 继承全局默认（settings）
@@ -221,6 +222,7 @@ BotConfig resolveBotConfig(const db::Bot& bot) {
   BotConfig cfg;
   cfg.system_prompt = bot.system_prompt;
   cfg.temperature = bot.temperature;
+  cfg.max_tokens = bot.max_tokens;
   cfg.base_url = bot.api_base_url;
   cfg.model = bot.api_model;
   cfg.api_key = unprotectOrEmpty(bot.api_key_enc);
@@ -351,6 +353,7 @@ void runChat(int64_t sessionId, const std::string& content, bool appendUser,
   llm::ChatRequest req;
   req.messages = ctx;
   req.temperature = cfg.temperature;
+  req.max_tokens = cfg.max_tokens;
   req.base_url = cfg.base_url;
   req.api_key = cfg.api_key;
   req.model = cfg.model;
@@ -406,10 +409,10 @@ void runChat(int64_t sessionId, const std::string& content, bool appendUser,
             g_stopFlags.erase(sessionId);
           }
           if (!*hadError && !full->empty()) {
-            db::appendMessage(sessionId, "assistant", *full);
+            int64_t aid = db::appendMessage(sessionId, "assistant", *full).id;
             if (botId > 0)
               mem::MemoryService::instance().enqueueExtract(
-                  botId, "private", 0, "用户：" + userText + "\n助手：" + *full + "\n");
+                  botId, "private", 0, "用户：" + userText + "\n助手：" + *full + "\n", aid);
             db::touchSession(sessionId);
             ev::EventBus::instance().emit(
                 "chat.completed",

@@ -25,12 +25,14 @@ struct FakeStream {
   std::function<void()> onCall;
   std::mutex reqMtx;
   std::vector<llm::ChatMsg> lastMessages;
+  int lastMaxTokens = 0;
 
   void operator()(const llm::ChatRequest& req, llm::StreamCallback cb,
                   const std::atomic_bool& stop) {
     {
       std::lock_guard<std::mutex> lk(reqMtx);
       lastMessages = req.messages;
+      lastMaxTokens = req.max_tokens;
     }
     int n = calls.fetch_add(1) + 1;
     if (onCall) onCall();
@@ -115,7 +117,7 @@ TEST_CASE("engine: 上下文 = 人设 + 话题 + 最近12条（不含他人人�
   auto path = tmpDb("ac_v2_engine_ctx.db");
   REQUIRE(db::open(path.string()));
   db::setSetting("memory_extraction", "0");   // 引擎测试不触发提取 LLM 调用
-  db::Bot ba; ba.name = "甲"; ba.system_prompt = "你是甲";
+  db::Bot ba; ba.name = "甲"; ba.system_prompt = "你是甲"; ba.max_tokens = 1234;
   auto b1 = db::createBot(ba);
   auto g = db::createGroup("上下文群", "话题Y");
   db::setGroupMembers(g.id, {b1.id});
@@ -131,6 +133,8 @@ TEST_CASE("engine: 上下文 = 人设 + 话题 + 最近12条（不含他人人�
   REQUIRE(e.start());
   waitUntil([&] { return col.count("turn_end") >= 1; });
   REQUIRE(e.stop());
+
+  CHECK(fake.lastMaxTokens == 1234);          // bot 配置 max_tokens 进入请求
 
   std::vector<llm::ChatMsg> ctx;
   {

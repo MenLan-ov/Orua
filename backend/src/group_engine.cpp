@@ -235,6 +235,7 @@ bool GroupEngine::runTurn(const Member& m, int turn) {
 llm::ChatRequest GroupEngine::buildRequest(const db::Bot& bot) {
   llm::ChatRequest req;
   req.temperature = bot.temperature;
+  req.max_tokens = bot.max_tokens;
   // API 覆盖：机器人字段非空则覆盖全局 settings
   req.base_url = !bot.api_base_url.empty()
                      ? bot.api_base_url

@@ -63,11 +63,12 @@ void MemoryService::ensureWorker() {
 }
 
 void MemoryService::enqueueExtract(int64_t botId, const std::string& scope,
-                                   int64_t groupId, const std::string& dialogue) {
+                                   int64_t groupId, const std::string& dialogue,
+                                   int64_t sourceMsgId) {
   if (db::getSetting("memory_extraction").value_or("1") != "1") return;
   {
     std::lock_guard<std::mutex> lk(mtx_);
-    queue_.push_back({botId, scope, groupId, dialogue});
+    queue_.push_back({botId, scope, groupId, dialogue, sourceMsgId});
     ensureWorker();
   }
   cv_.notify_one();
@@ -110,6 +111,7 @@ llm::ChatRequest MemoryService::buildExtractRequest(const db::Bot& bot) {
     }
   }
   req.model = !bot.api_model.empty() ? bot.api_model : db::getSetting("model").value_or("");
+  req.max_tokens = bot.max_tokens;
   req.proxy_enabled = db::getSetting("proxy_enabled").value_or("0") == "1";
   req.proxy_host = db::getSetting("proxy_host").value_or("");
   try {
@@ -134,11 +136,11 @@ void MemoryService::extractOnce(const ExtractJob& job) {
       db::updateMemoryContent(existing.front().id, existing.front().content);  // update 占位
     } else {
       db::addMemory(job.bot_id, job.scope, job.group_id, "记住：用户喜欢咖啡",
-                    "[\"咖啡\",\"偏好\"]", 0);
+                    "[\"咖啡\",\"偏好\"]", job.source_msg_id);
     }
     if (existing.size() < 2)
       db::addMemory(job.bot_id, job.scope, job.group_id, "记住：助手应当先问好再回答",
-                    "[\"礼仪\"]", 0);
+                    "[\"礼仪\"]", job.source_msg_id);
     return;
   }
 
@@ -194,7 +196,7 @@ void MemoryService::applyOps(const std::string& rawJson, const ExtractJob& job) 
     std::string tags = "[]";
     if (op.contains("tags") && op["tags"].is_array()) tags = op["tags"].dump();
     if (action == "new") {
-      db::addMemory(job.bot_id, job.scope, job.group_id, content, tags, 0);
+      db::addMemory(job.bot_id, job.scope, job.group_id, content, tags, job.source_msg_id);
     } else if (action == "update") {
       int64_t id = op.value("memory_id", (int64_t)0);
       if (id > 0) db::updateMemoryContent(id, content);
