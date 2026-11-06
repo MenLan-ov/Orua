@@ -185,6 +185,8 @@ const App = {
     gmsgSeen: new Set(),
     botAvatarFile: null,
     botAvatarRemove: false,
+    memoryBotId: null,
+    memories: [],
   },
   commands: new Map(),
   registerCommand(name, fn) { this.commands.set(name, fn); },
@@ -224,6 +226,7 @@ function switchView(view) {
   $('view-messages').classList.toggle('hidden', view !== 'messages');
   $('view-bots').classList.toggle('hidden', view !== 'bots');
   $('view-groups').classList.toggle('hidden', view !== 'groups');
+  $('view-memory').classList.toggle('hidden', view !== 'memory');
   $('btn-new-session').classList.toggle('hidden', view !== 'messages');
   $('btn-new-bot').classList.toggle('hidden', view !== 'bots');
   $('btn-new-group').classList.toggle('hidden', view !== 'groups');
@@ -237,6 +240,7 @@ function switchView(view) {
   } else {
     App.run('close-group-room');
   }
+  if (view === 'memory') { renderMemoryBots(); loadMemories(); }
 }
 
 /* ================= 单聊气泡 ================= */
@@ -1041,6 +1045,72 @@ App.registerCommand('delete-group', async (id) => {
   await refreshGroups();
 });
 
+/* ================= 记忆库 ================= */
+function renderMemoryBots() {
+  const el = $('memory-bot-list');
+  el.innerHTML = '';
+  const bots = App.state.bots || [];
+  if (!App.state.memoryBotId && bots.length) App.state.memoryBotId = bots[0].id;
+  for (const b of bots) {
+    const item = document.createElement('div');
+    item.className = 'list-item' + (b.id === App.state.memoryBotId ? ' active' : '');
+    item.innerHTML = `<div class="list-item-avatar">${botAvatarHtml(b)}</div>
+      <div class="list-item-body"><div class="list-item-title">${escapeHtml(b.name)}</div></div>`;
+    item.onclick = () => { App.state.memoryBotId = b.id; renderMemoryBots(); loadMemories(); };
+    el.appendChild(item);
+  }
+}
+
+async function loadMemories(q = '') {
+  const id = App.state.memoryBotId;
+  const el = $('mem-list');
+  el.innerHTML = '';
+  if (!id) { $('mem-empty').classList.remove('hidden'); return; }
+  const res = await App.api.get(`/api/v1/bots/${id}/memories${q ? `?q=${encodeURIComponent(q)}` : ''}`);
+  App.state.memories = res.memories || [];
+  $('mem-empty').classList.toggle('hidden', App.state.memories.length > 0);
+  for (const m of App.state.memories) {
+    const card = document.createElement('div');
+    card.className = 'mem-item';
+    const grp = App.state.groups.find((g) => g.id === m.group_id);
+    const scopeLabel = m.scope === 'group' ? `群聊 · ${escapeHtml(grp?.name || '已删除群')}` : '私聊';
+    const tags = (() => { try { return JSON.parse(m.tags || '[]'); } catch (_) { return []; } })();
+    const srcLink = m.source_session_id
+      ? `<button class="btn-ghost" data-src="${m.source_session_id}">来源</button>` : '';
+    card.innerHTML = `
+      <div class="mem-content">${escapeHtml(m.content)}</div>
+      <div class="mem-meta">
+        <span class="mem-scope">${scopeLabel}</span>
+        ${tags.map((t) => `<span>#${escapeHtml(t)}</span>`).join(' ')}
+        <span>${escapeHtml(m.updated_at || '')}</span>
+        <span class="mem-actions">
+          ${srcLink}
+          <button class="btn-ghost" data-edit="${m.id}">编辑</button>
+          <button class="btn-ghost" data-del="${m.id}">删除</button>
+        </span>
+      </div>`;
+    card.querySelector('[data-edit]')?.addEventListener('click', () => openMemoryEditor(m));
+    card.querySelector('[data-del]')?.addEventListener('click', async () => {
+      if (!confirm('删除这条记忆？')) return;
+      await App.api.del(`/api/v1/bots/${id}/memories/${m.id}`);
+      toast('记忆已删除');
+      loadMemories($('mem-search').value.trim());
+    });
+    card.querySelector('[data-src]')?.addEventListener('click', () => {
+      App.run('select-session', Number(card.querySelector('[data-src]').dataset.src));
+      switchView('messages');
+    });
+    el.appendChild(card);
+  }
+}
+
+let editingMemoryId = null;
+function openMemoryEditor(m) {
+  editingMemoryId = m.id;
+  $('me-content').value = m.content;
+  $('modal-memory').classList.remove('hidden');
+}
+
 /* ================= 设置 ================= */
 App.registerCommand('open-settings', () => {
   const c = App.state.config || {};
@@ -1182,6 +1252,20 @@ $('btn-group-pause').addEventListener('click', () => App.run('group-pause'));
 $('btn-group-resume').addEventListener('click', () => App.run('group-resume'));
 $('btn-group-stop').addEventListener('click', () => App.run('group-stop'));
 $('btn-group-interject').addEventListener('click', () => App.run('group-interject'));
+
+$('btn-mem-search').addEventListener('click', () => loadMemories($('mem-search').value.trim()));
+$('mem-search').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadMemories($('mem-search').value.trim()); });
+$('btn-mem-refresh').addEventListener('click', () => loadMemories($('mem-search').value.trim()));
+$('btn-memory-cancel').addEventListener('click', () => $('modal-memory').classList.add('hidden'));
+$('btn-memory-save').addEventListener('click', async () => {
+  if (!editingMemoryId) return;
+  const content = $('me-content').value.trim();
+  if (!content) { toast('记忆内容不能为空'); return; }
+  await App.api.put(`/api/v1/bots/${App.state.memoryBotId}/memories/${editingMemoryId}`, { content });
+  $('modal-memory').classList.add('hidden');
+  toast('记忆已更新');
+  loadMemories($('mem-search').value.trim());
+});
 
 inputEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {

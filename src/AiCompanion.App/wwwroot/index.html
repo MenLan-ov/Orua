@@ -33,6 +33,7 @@
           <button class="tab-btn active" data-view="messages">消息</button>
           <button class="tab-btn" data-view="bots">Bot</button>
           <button class="tab-btn" data-view="groups">群聊</button>
+          <button class="tab-btn" data-view="memory">记忆</button>
         </nav>
         <div class="side-actions">
           <button id="btn-new-session" class="btn-primary full">＋ 新对话</button>
@@ -152,6 +153,26 @@
             </div>
           </div>
         </div>
+
+      <div id="view-memory" class="view hidden">
+        <div class="view-header"><h2>Bot 记忆库</h2></div>
+        <div class="memory-layout">
+          <div class="memory-bots">
+            <h3>我的 Bot</h3>
+            <div id="memory-bot-list"></div>
+          </div>
+          <div class="memory-panel">
+            <div class="memory-toolbar">
+              <input id="mem-search" placeholder="搜一搜…比如「生日」「咖啡」">
+              <button id="btn-mem-search" class="btn-ghost">搜索</button>
+              <button id="btn-mem-refresh" class="btn-ghost">刷新</button>
+            </div>
+            <div class="mem-hint">记忆在本地，改这里就改变 Bot 的行为</div>
+            <div id="mem-list"></div>
+            <div id="mem-empty" class="empty-title hidden">还没有记忆</div>
+          </div>
+        </div>
+      </div>
       </section>
     </div>
   </div>
@@ -221,6 +242,18 @@
       <div class="modal-actions">
         <button id="btn-bot-cancel" class="btn-ghost">取消</button>
         <button id="btn-bot-save" class="btn-primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 记忆编辑弹窗 -->
+  <div id="modal-memory" class="modal hidden">
+    <div class="modal-box">
+      <h3>编辑记忆</h3>
+      <textarea id="me-content" rows="4"></textarea>
+      <div class="modal-actions">
+        <button id="btn-memory-cancel" class="btn-ghost">取消</button>
+        <button id="btn-memory-save" class="btn-primary">保存</button>
       </div>
     </div>
   </div>
