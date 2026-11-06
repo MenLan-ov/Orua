@@ -21,6 +21,7 @@
 #include "json_util.h"
 #include "llm_provider.h"
 #include "logger.h"
+#include "memory_service.h"
 #include "openai_provider.h"
 
 namespace srv {
@@ -333,8 +334,12 @@ void runChat(int64_t sessionId, const std::string& content, bool appendUser,
 
   // 先组装上下文再落库，避免 user 消息在 LLM 上下文中重复出现
   auto history = db::listMessages(sessionId);
+  // v3：私聊记忆注入（增强式；检索失败为空时等价 v2）
+  std::vector<db::Memory> mems;
+  if (bot) mems = mem::MemoryService::instance().pickMemories(
+                    bot->id, "private", 0, appendUser ? content : "", 5);
   auto ctx = chat::buildContext(cfg.system_prompt, history, keep,
-                                appendUser ? content : "");
+                                appendUser ? content : "", mems);
 
   if (appendUser) {
     auto sess = db::getSession(sessionId);
@@ -364,10 +369,13 @@ void runChat(int64_t sessionId, const std::string& content, bool appendUser,
   auto errCode = std::make_shared<int>(0);
   auto errMsg = std::make_shared<std::string>();
 
+  int64_t botId = bot ? bot->id : 0;
+  std::string userText = appendUser ? content : (history.empty() ? "" : history.back().content);
+
   res.set_header("Cache-Control", "no-cache");
   res.set_chunked_content_provider(
       "text/event-stream",
-      [req, sessionId, stop, full, hadError, errCode, errMsg](size_t,
+      [req, sessionId, botId, userText, stop, full, hadError, errCode, errMsg](size_t,
                                                              httplib::DataSink& sink) {
         try {
           llm::OpenAiCompatProvider provider;
@@ -399,6 +407,9 @@ void runChat(int64_t sessionId, const std::string& content, bool appendUser,
           }
           if (!*hadError && !full->empty()) {
             db::appendMessage(sessionId, "assistant", *full);
+            if (botId > 0)
+              mem::MemoryService::instance().enqueueExtract(
+                  botId, "private", 0, "用户：" + userText + "\n助手：" + *full + "\n");
             db::touchSession(sessionId);
             ev::EventBus::instance().emit(
                 "chat.completed",

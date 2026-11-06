@@ -121,6 +121,16 @@ $gd = Invoke-RestMethod "$base/api/v1/groups/$gid"
 Assert-True ($gd.data.status -eq 'idle') 'group status idle after stop'
 Assert-True ($gd.data.members.Count -eq 2) 'group detail members'
 
+# ---- v3: 群聊记忆提取端到端（T4 已接线，轮转 ≥2 轮 → 默认 Bot 必发言） ----
+$gmemGot = $null
+for ($i = 0; $i -lt 20; $i++) {
+  $gmr = Invoke-RestMethod "$base/api/v1/bots/$defaultBotId/memories?scope=group&group_id=$gid"
+  if ($gmr.data.memories.Count -ge 2) { $gmemGot = $gmr; break }
+  Start-Sleep -Milliseconds 500
+}
+Assert-True ($null -ne $gmemGot) 'group memories extracted after run'
+Assert-True (@($gmemGot.data.memories | Where-Object { $_.scope -eq 'group' -and $_.group_id -eq $gid }).Count -ge 2) 'group scope memories'
+
 # 删除群（级联）
 Invoke-RestMethod "$base/api/v1/groups/$gid" -Method Delete | Out-Null
 $gl = Invoke-RestMethod "$base/api/v1/groups"
@@ -207,7 +217,40 @@ $m = Invoke-RestMethod "$base/api/v1/messages?session_id=$sid&limit=10"
 Assert-True ($m.data.Count -eq 2) "messages count=$($m.data.Count)"
 Assert-True (($m.data | Where-Object role -eq 'assistant').content.Length -gt 0) 'assistant message stored'
 
-# 重新生成（删除最后一条 assistant 并重跑，仍应有 2 条）
+# ---- v3: 私聊记忆提取端到端（上段 chat 已触发异步提取） ----
+$memGot = $null
+for ($i = 0; $i -lt 20; $i++) {
+  $mr = Invoke-RestMethod "$base/api/v1/bots/$defaultBotId/memories?scope=private"
+  if ($mr.data.memories.Count -ge 2) { $memGot = $mr; break }
+  Start-Sleep -Milliseconds 500
+}
+Assert-True ($null -ne $memGot) 'private memories extracted after chat'
+Assert-True (@($memGot.data.memories | Where-Object { $_.scope -eq 'private' }).Count -ge 2) 'private scope memories'
+Assert-True (($memGot.data.memories | Where-Object { $_.content -match '咖啡' }) -ne $null) 'coffee memory present'
+
+# 开关关闭后不再新增
+Invoke-Json 'Post' "$base/api/v1/config" @{ memory_extraction = '0' } | Out-Null
+$c0 = Invoke-RestMethod "$base/api/v1/bots/$defaultBotId/memories"
+$pfileM = Join-Path $env:TEMP 'ac_v3_chat2.json'
+$tmpM = Join-Path $env:TEMP 'ac_v3_chat2_sse.txt'
+[IO.File]::WriteAllText($pfileM, '{"session_id":' + $sid + ',"content":"hello again"}')
+& curl.exe -s -N -X POST "$base/api/v1/chat/stream" -H "Content-Type: application/json" --data-binary "@$pfileM" -o $tmpM
+Assert-True ((Get-Content $tmpM -Raw) -match 'event: done') 'v3 chat off done'
+Start-Sleep -Seconds 2
+$c1 = Invoke-RestMethod "$base/api/v1/bots/$defaultBotId/memories"
+Assert-True ($c1.data.memories.Count -eq $c0.data.memories.Count) 'extraction off: no new memories'
+Invoke-Json 'Post' "$base/api/v1/config" @{ memory_extraction = '1' } | Out-Null
+
+# 记忆编辑/删除 API 全链路
+$mem0 = $c0.data.memories[0]
+Invoke-Json 'Put' "$base/api/v1/bots/$defaultBotId/memories/$($mem0.id)" @{ content = '改过的记忆' } | Out-Null
+$mu = Invoke-RestMethod "$base/api/v1/bots/$defaultBotId/memories"
+Assert-True (($mu.data.memories | Where-Object id -eq $mem0.id).content -eq '改过的记忆') 'memory edit roundtrip'
+Invoke-RestMethod "$base/api/v1/bots/$defaultBotId/memories/$($mem0.id)" -Method Delete | Out-Null
+$md = Invoke-RestMethod "$base/api/v1/bots/$defaultBotId/memories"
+Assert-True (($md.data.memories | Where-Object id -eq $mem0.id) -eq $null) 'memory delete'
+
+# 重新生成（删除最后一条 assistant 并重跑；v3 提取关闭段多聊了一轮，共 4 条）
 $rfile = Join-Path $env:TEMP 'ac_reg.json'
 [IO.File]::WriteAllText($rfile, '{"session_id":' + $sid + '}')
 $tmp3 = Join-Path $env:TEMP 'ac_sse2.txt'
@@ -216,7 +259,7 @@ $sse3 = Get-Content $tmp3 -Raw -Encoding UTF8
 Remove-Item $tmp3, $rfile
 Assert-True ($sse3 -match 'event: done') 'regenerate done'
 $m2 = Invoke-RestMethod "$base/api/v1/messages?session_id=$sid&limit=10"
-Assert-True ($m2.data.Count -eq 2) 'regenerate keeps 2 messages'
+Assert-True ($m2.data.Count -eq 4) 'regenerate keeps 4 messages'
 
 # 导出 md 与 json
 $tmp4 = Join-Path $env:TEMP 'ac_export.md'
@@ -229,7 +272,7 @@ $tmp5 = Join-Path $env:TEMP 'ac_export.json'
 & curl.exe -s -X POST "$base/api/v1/export?session_id=$sid&format=json" -o $tmp5
 $j = Get-Content $tmp5 -Raw -Encoding UTF8 | ConvertFrom-Json
 Remove-Item $tmp5
-Assert-True ($j.messages.Count -eq 2) 'export json message count'
+Assert-True ($j.messages.Count -eq 4) 'export json message count'
 
 # 清空会话消息
 Invoke-RestMethod "$base/api/v1/messages?session_id=$sid" -Method Delete | Out-Null
