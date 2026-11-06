@@ -1580,21 +1580,49 @@ App.registerCommand('backend-status', (p) => {
 
 /* 提醒到期提示：仅主窗口轮询，toast 走 textContent 渲染，故直接传原文不做转义 */
 const REMINDER_POLL_MS = 15000;
+// toast() 是单元素、后写覆盖前写：一轮最多逐条提示这么多条，其余合并成一条计数提示，
+// 否则一次 tick 里多条到期只有最后一条看得见，前面的却已被标记完成（静默丢失）。
+const REMINDER_TOAST_MAX = 2;
 const remindersSurfaced = new Set();
 let reminderPolling = false;
 let reminderTimer = null;
+
+// 呈现并回执：只有文案真正落到 toast 元素上才算「已提示」，调用方据此才记账/标完成
+function surfaceToast(msg) {
+  toast(msg);
+  const el = $('toast');
+  return !!el && el.textContent === msg;
+}
+
 async function reminderTick() {
   if (reminderPolling) return;
   reminderPolling = true;
   try {
     const res = await App.api.get('/api/v1/reminders?due=1');
-    for (const r of (res && res.reminders) || []) {
-      if (remindersSurfaced.has(r.id)) continue;
-      // 先记账再提示：POST done 失败也只是本次会话不再重复提示，绝不死循环刷屏
-      remindersSurfaced.add(r.id);
+    // 本轮新到期的按 due_at 升序（服务端已排序，这里再排一次保证「最早的先占 toast 位」）
+    const fresh = (((res && res.reminders) || []).filter((r) => !remindersSurfaced.has(r.id)))
+      .sort((a, b) => String(a.due_at || '').localeCompare(String(b.due_at || '')));
+    if (!fresh.length) return;
+    const head = fresh.slice(0, REMINDER_TOAST_MAX);
+    const rest = fresh.slice(REMINDER_TOAST_MAX);
+    const shown = [];
+    for (const r of head) {
       const bot = App.state.bots.find((b) => b.id === r.bot_id);
-      toast(bot ? `${bot.name}提醒你：${r.content}` : `提醒你：${r.content}`);
-      try { await App.api.post(`/api/v1/reminders/${r.id}/done`); } catch (_) {}
+      if (surfaceToast(bot ? `${bot.name}提醒你：${r.content}` : `提醒你：${r.content}`)) {
+        remindersSurfaced.add(r.id);
+        shown.push(r.id);
+      }
+    }
+    // 剩余条合并为一条计数提示：合并 toast 覆盖了它们，才视为已呈现
+    if (rest.length && surfaceToast(`另有 ${rest.length} 条到期提醒`)) {
+      for (const r of rest) {
+        remindersSurfaced.add(r.id);
+        shown.push(r.id);
+      }
+    }
+    // 先记账再标 done：POST 失败也只是本会话不再重复提示，绝不死循环刷屏
+    for (const id of shown) {
+      try { await App.api.post(`/api/v1/reminders/${id}/done`); } catch (_) {}
     }
   } catch (_) {
   } finally {
