@@ -78,7 +78,9 @@ struct CalcParser {
 };
 
 json execCalculator(const json& params) {
-  std::string expr = params.value("expression", "");
+  std::string expr;
+  if (params.contains("expression") && params["expression"].is_string())
+    expr = params["expression"].get<std::string>();
   if (expr.empty()) return {{"error", "表达式为空"}};
   try {
     CalcParser p(expr);
@@ -135,7 +137,9 @@ bool isBlockedHost(const std::string& host) {
 std::wstring widen(const std::string& s) { return std::wstring(s.begin(), s.end()); }
 
 json execHttpGet(const json& params) {
-  std::string url = params.value("url", "");
+  std::string url;
+  if (params.contains("url") && params["url"].is_string())
+    url = params["url"].get<std::string>();
   if (url.empty()) return {{"error", "url 为空"}};
   bool https = true;
   if (url.rfind("https://", 0) == 0) url = url.substr(8);
@@ -189,7 +193,9 @@ json execHttpGet(const json& params) {
 }
 
 json execFileRead(const json& params) {
-  std::string p = params.value("path", "");
+  std::string p;
+  if (params.contains("path") && params["path"].is_string())
+    p = params["path"].get<std::string>();
   if (p.empty()) return {{"error", "path 为空"}};
   std::ifstream ifs(p, std::ios::binary);
   if (!ifs) return {{"error", "文件打开失败"}};
@@ -203,12 +209,23 @@ json execFileRead(const json& params) {
 }
 
 json execReminder(const json& params) {
-  std::string content = params.value("content", "");
-  std::string due = params.value("due_at", "");
+  std::string content;
+  if (params.contains("content") && params["content"].is_string())
+    content = params["content"].get<std::string>();
+  std::string due;
+  if (params.contains("due_at") && params["due_at"].is_string())
+    due = params["due_at"].get<std::string>();
   if (content.empty() || due.empty()) return {{"error", "content/due_at 不能为空"}};
-  auto r = db::addReminder(params.value("bot_id", (int64_t)0), content, due);
-  if (r.id <= 0) return {{"error", "提醒写入失败"}};
-  return {{"ok", true}, {"id", r.id}};
+  try {
+    int64_t botId = params.contains("bot_id") && params["bot_id"].is_number()
+                        ? params["bot_id"].get<int64_t>()
+                        : 0;
+    auto r = db::addReminder(botId, content, due);
+    if (r.id <= 0) return {{"error", "提醒写入失败"}};
+    return {{"ok", true}, {"id", r.id}};
+  } catch (const std::exception& e) {
+    return {{"error", std::string("提醒写入失败：") + e.what()}};
+  }
 }
 
 }  // namespace
@@ -235,13 +252,14 @@ std::vector<SkillDef> registry() {
        json{{"type", "object"},
             {"properties",
              json{{"content", json{{"type", "string"}}},
-                  {"due_at", json{{"type", "string", "description"}},
-                   {"description", "ISO 8601 时间字符串"}}}},
+                  {"due_at", json{{"type", "string"},
+                                  {"description", "ISO 8601 时间字符串"}}}}},
             {"required", json::array({"content", "due_at"})}}},
   };
 }
 
 json execute(const std::string& id, const json& params) {
+  if (!params.is_object()) return {{"error", "参数必须为 JSON 对象"}};
   if (id == "calculator") return execCalculator(params);
   if (id == "datetime") return execDatetime(params);
   if (id == "sysinfo") return execSysinfo(params);

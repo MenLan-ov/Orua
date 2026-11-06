@@ -26,7 +26,15 @@ TEST_CASE("skills_exec: registry 六技能") {
     CHECK(!s.name.empty());
     CHECK(!s.description.empty());
     CHECK(s.params_schema.is_object());
+    REQUIRE(s.params_schema["properties"].is_object());
+    if (s.params_schema["properties"].is_object())
+      for (auto& [k, v] : s.params_schema["properties"].items()) CHECK(v.is_object());
   }
+}
+
+TEST_CASE("skills_exec: execute 非对象/错型参数不抛异常") {
+  CHECK(!sk::execute("calculator", json::array()).contains("result"));
+  CHECK(sk::execute("calculator", {{"expression", 123}}).contains("error"));
 }
 
 TEST_CASE("skills_exec: calculator 四则运算与非法输入") {
