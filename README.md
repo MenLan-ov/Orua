@@ -129,7 +129,7 @@ powershell -ExecutionPolicy Bypass -File scripts\test_api.ps1
 | calculator | 四则运算表达式 | 自制解析器，仅支持 `+ - * / ( )`、数字与空格；非法输入返回错误文本，**无 eval** |
 | datetime | 时间日期 | 当前时间 / 日期 / 星期，取本地系统时间，零依赖 |
 | sysinfo | 系统信息 | 内存与磁盘占用（GlobalMemoryStatusEx / GetDiskFreeSpaceExW，只读） |
-| http_get | HTTP 请求 | WinHTTP GET，正文 ≤2KB 截断、10s 超时；**拒绝 localhost / 127.* / 内网段（10. / 172.16-31. / 192.168.）防 SSRF** |
+| http_get | HTTP 请求 | 仅公网 http(s)，正文 ≤2KB 截断、10s 超时；拒绝 localhost / `.localhost` / 内网段（10. / 172.16-31. / 192.168. / 169.254. / 0.）/ 回环（127.*、`::1`、`::ffff:` 映射）与数字简写主机（十进制 `2130706433`、十六进制 `0x7f000001`、八进制 `0177.0.0.1`）防 SSRF；**不跟随重定向**（3xx 直接回 `status_code` + `location`，跳转目标不会被访问） |
 | file_read | 读取文件 | 读取指定本地文本文件，≤8KB 截断，失败返回错误文本 |
 | reminder | 定时提醒 | 解析相对分钟或绝对时间，写入 `reminders` 表（到期提示见验收清单备注） |
 

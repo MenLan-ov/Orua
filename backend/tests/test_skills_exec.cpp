@@ -72,6 +72,88 @@ TEST_CASE("skills_exec: http_get 拒绝内网地址") {
   CHECK(r4.contains("error"));
 }
 
+TEST_CASE("skills_exec: isBlockedHost 主机归一化与内网判定（纯函数，不发请求）") {
+  // 大小写不敏感 + FQDN 尾点
+  CHECK(sk::isBlockedHost("localhost"));
+  CHECK(sk::isBlockedHost("LOCALHOST"));
+  CHECK(sk::isBlockedHost("LocalHost."));
+  CHECK(sk::isBlockedHost("localHOST."));
+  CHECK(sk::isBlockedHost("API.LOCALHOST"));
+  // 内网/链路本地/未指定段
+  CHECK(sk::isBlockedHost("127.0.0.1"));
+  CHECK(sk::isBlockedHost("127.9.9.9"));
+  CHECK(sk::isBlockedHost("10.1.2.3"));
+  CHECK(sk::isBlockedHost("192.168.2.2"));
+  CHECK(sk::isBlockedHost("169.254.1.1"));
+  CHECK(sk::isBlockedHost("0.0.0.0"));
+  CHECK(sk::isBlockedHost("0.1.2.3"));
+  CHECK(sk::isBlockedHost("172.16.0.1"));
+  CHECK(sk::isBlockedHost("172.31.255.255"));
+  // 十进制/十六进制/八进制简写
+  CHECK(sk::isBlockedHost("2130706433"));
+  CHECK(sk::isBlockedHost("0x7f000001"));
+  CHECK(sk::isBlockedHost("0X7F000001"));
+  CHECK(sk::isBlockedHost("0177.0.0.1"));
+  // IPv6 回环与 v4 映射，带/不带方括号、带端口
+  CHECK(sk::isBlockedHost("::1"));
+  CHECK(sk::isBlockedHost("::"));
+  CHECK(sk::isBlockedHost("[::1]"));
+  CHECK(sk::isBlockedHost("[::1]:8765"));
+  CHECK(sk::isBlockedHost("0:0:0:0:0:0:0:1"));
+  CHECK(sk::isBlockedHost("[::ffff:127.0.0.1]"));   // 带点形式解析不了 → 从严拒绝
+  CHECK(sk::isBlockedHost("[::ffff:7f00:1]"));      // = ::ffff:127.0.0.1
+  CHECK(sk::isBlockedHost("[::ffff:a00:1]"));       // = ::ffff:10.0.0.1
+  CHECK(sk::isBlockedHost("[::]"));
+  // 公网放行（这些只能走纯函数断言，测试绝不发真实网络请求）
+  CHECK_FALSE(sk::isBlockedHost("example.com"));
+  CHECK_FALSE(sk::isBlockedHost("EXAMPLE.COM."));
+  CHECK_FALSE(sk::isBlockedHost("172.32.0.1"));
+  CHECK_FALSE(sk::isBlockedHost("172.15.0.1"));
+  CHECK_FALSE(sk::isBlockedHost("8.8.8.8"));
+  CHECK_FALSE(sk::isBlockedHost("2606:4700:4700::1111"));
+  CHECK_FALSE(sk::isBlockedHost("[::ffff:808:808]"));  // = ::ffff:8.8.8.8
+  CHECK_FALSE(sk::isBlockedHost("[2606:4700:4700::1111]"));      // 公网 v6，无端口
+  CHECK_FALSE(sk::isBlockedHost("[2606:4700:4700::1111]:443"));  // 公网 v6，带端口
+}
+
+TEST_CASE("skills_exec: http_get URL 层拒绝（归一化后仍拦得住）") {
+  // 每个 URL 都在建连前被拒，返回 error 且不发起请求
+  const char* urls[] = {
+      "http://LOCALHOST/",        "http://LocalHost./",     "http://0.0.0.0/",
+      "http://2130706433/",       "http://0x7f000001/",     "http://0177.0.0.1/",
+      "http://[::1]/",            "http://[::1]:8765/x",    "http://::1/",
+      "http://169.254.1.1/",      "http://172.16.0.1/",     "http://172.31.255.255/",
+      "http://admin@127.0.0.1/",  "http://user:pass@localhost:8080/",
+  };
+  for (const char* u : urls) {
+    auto r = sk::execute("http_get", {{"url", u}});
+    INFO(u);
+    CHECK(r.contains("error"));
+    CHECK(r["error"].get<std::string>().find("拒绝") != std::string::npos);
+    CHECK_FALSE(r.contains("body"));
+  }
+  // 非法/缺主机的 URL 走错误文本而非崩溃（绝不落到建连步骤）
+  const char* bad[] = {"http://", "http:///path", "ftp://example.com/",
+                       "http://[::1", "http://[::1]x/", ""};
+  for (const char* u : bad) {
+    auto r = sk::execute("http_get", {{"url", u}});
+    INFO(u);
+    CHECK(r.contains("error"));
+    CHECK_FALSE(r.contains("body"));
+  }
+}
+
+TEST_CASE("skills_exec: http_get 描述披露不跟随重定向") {
+  bool found = false;
+  for (auto& s : sk::registry()) {
+    if (s.id != "http_get") continue;
+    found = true;
+    CHECK(s.description.find("不跟随重定向") != std::string::npos);
+    CHECK(s.description.find("内网") != std::string::npos);
+  }
+  CHECK(found);
+}
+
 TEST_CASE("skills_exec: file_read 截断与错误") {
   auto big = std::filesystem::temp_directory_path() / "ac_v4_skill_big.txt";
   {
