@@ -454,6 +454,9 @@ void runChat(int64_t sessionId, const std::string& content, bool appendUser,
                 if (parsed.is_object()) params = parsed;
               } catch (...) {
               }
+              // 提醒必须落到当前 Bot：params 全部来自 LLM 的 arguments，没人会填 bot_id，
+              // 于是原先一律 bot_id=0，deleteBot 级联与「谁提醒你」都失效
+              if (name == "reminder" && botId > 0) params["bot_id"] = botId;
               std::string payload;
               try {
                 json result = sk::execute(name, params);

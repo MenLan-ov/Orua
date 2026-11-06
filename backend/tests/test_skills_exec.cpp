@@ -213,3 +213,148 @@ TEST_CASE("skills_exec: reminder 写入数据库") {
   db::close();
   std::filesystem::remove(path);
 }
+
+TEST_CASE("skills: normalizeDueAt 绝对形式（含时区与本地墙钟）") {
+  // 显式 UTC：原样
+  CHECK(sk::normalizeDueAt("2026-12-01T10:00:00Z") == "2026-12-01T10:00:00Z");
+  CHECK(sk::normalizeDueAt("2026-12-01T10:00:00.250Z") == "2026-12-01T10:00:00Z");
+  CHECK(sk::normalizeDueAt("2026-12-01t10:00:00z") == "2026-12-01T10:00:00Z");
+  CHECK(sk::normalizeDueAt("2026-12-01T10:00Z") == "2026-12-01T10:00:00Z");   // 分钟精度补秒
+  // 显式偏移：换算成 UTC
+  CHECK(sk::normalizeDueAt("2026-12-01T10:00:00+08:00") == "2026-12-01T02:00:00Z");
+  CHECK(sk::normalizeDueAt("2026-12-01T10:00:00+0800") == "2026-12-01T02:00:00Z");
+  CHECK(sk::normalizeDueAt("2026-12-01T02:00:00-05:00") == "2026-12-01T07:00:00Z");
+  // 无时区标记（空格分隔）：按本地墙钟解释，再转 UTC —— 与 CRT 同算法比对，不受机器时区影响
+  {
+    std::tm local{};
+    local.tm_year = 2026 - 1900; local.tm_mon = 11; local.tm_mday = 1;
+    local.tm_hour = 10; local.tm_min = 0; local.tm_sec = 0; local.tm_isdst = -1;
+    std::time_t e = std::mktime(&local);
+    REQUIRE(e != static_cast<std::time_t>(-1));
+    std::tm utc{};
+    REQUIRE(gmtime_s(&utc, &e) == 0);
+    char want[32];
+    REQUIRE(std::strftime(want, sizeof(want), "%Y-%m-%dT%H:%M:%SZ", &utc) > 0);
+    auto got = sk::normalizeDueAt("2026-12-01 10:00:00");
+    CHECK(got.size() == 20);
+    CHECK(got.back() == 'Z');
+    CHECK(got == std::string(want));
+    // 输出必须与到期过滤用的 nowIso() 逐字符兼容
+    CHECK(sk::normalizeDueAt(nowIso()) == nowIso());
+  }
+  // 字符串比较定位：过去/未来在 due_at <= nowIso() 语义下站得住
+  CHECK(sk::normalizeDueAt("2000-01-01T00:00:00Z") < nowIso());
+  CHECK(sk::normalizeDueAt("2099-01-01T00:00:00Z") > nowIso());
+}
+
+TEST_CASE("skills: normalizeDueAt 相对形式与失败形式") {
+  auto lo = sk::normalizeDueAt("14分钟后");
+  auto hi = sk::normalizeDueAt("16分钟后");
+  REQUIRE(lo.size() == 20);
+  REQUIRE(hi.size() == 20);
+  // 相对分钟族：都落在 now+15min 附近（用 14/16 分钟边界卡住，能鉴别秒/小时误读）
+  const char* minForms[] = {"15分钟后", "15 分钟后", "in 15 minutes", "+15m", "15",
+                            "15min", "15 分钟"};
+  for (const char* s : minForms) {
+    INFO(s);
+    auto got = sk::normalizeDueAt(s);
+    CHECK_FALSE(got.empty());
+    CHECK(got > lo);
+    CHECK(got < hi);
+  }
+  // 小时族
+  auto hLo = sk::normalizeDueAt("59分钟后");
+  auto hHi = sk::normalizeDueAt("61分钟后");
+  const char* hourForms[] = {"1小时后", "1 小时后", "1h", "+1h", "in 1 hours"};
+  for (const char* s : hourForms) {
+    INFO(s);
+    auto got = sk::normalizeDueAt(s);
+    CHECK(got > hLo);
+    CHECK(got < hHi);
+  }
+  // 过去写法 = 已到期（早于 now）
+  CHECK(sk::normalizeDueAt("5分钟前") < nowIso());
+  CHECK(sk::normalizeDueAt("2小时前") < nowIso());
+  // 失败形式一律空串
+  const char* badForms[] = {"垃圾", "", "   ", "15秒后", "15天后", "abc15", "in 15 分钟后 多余",
+                            "2026-13-01T00:00:00Z", "2026-02-30", "1969-12-31T23:59:59Z",
+                            "2026-12-01T25:00:00Z", "2100-01-01T00:00:00Z", "12345678",
+                            "2026-12-01T10:00:00+99:00"};
+  for (const char* s : badForms) {
+    INFO(s);
+    CHECK(sk::normalizeDueAt(s).empty());
+  }
+}
+
+TEST_CASE("skills: 归一化 due_at 与到期过滤器的字符串比较契约") {
+  auto path = tmpDb("ac_v4_due_contract.db");
+  REQUIRE(db::open(path.string()));
+  auto b = db::createBot(db::Bot{0, "契约", "🤖", "", "人设"});
+  REQUIRE(b.id > 0);
+  auto fut = db::addReminder(b.id, "未到期", sk::normalizeDueAt("1分钟后"));
+  auto past = db::addReminder(b.id, "已到期", sk::normalizeDueAt("1分钟前"));
+  REQUIRE(fut.id > 0);
+  REQUIRE(past.id > 0);
+  auto due = db::listReminders(true);
+  REQUIRE(due.size() == 1);
+  CHECK(due[0].content == "已到期");          // 未来查不到、过去查得到
+  CHECK(due[0].due_at.size() == 20);
+  // 反面证据：旧行为把 LLM 原文直接入库时，"10分钟后" 因字符串比 nowIso() 小而「立刻到期」
+  db::addReminder(b.id, "脏数据", "10分钟后");
+  CHECK(db::listReminders(true).size() == 2);
+  db::close();
+  std::filesystem::remove(path);
+}
+
+TEST_CASE("skills_exec: reminder 归属 Bot（bot_id 链路）与 deleteBot 级联") {
+  auto path = tmpDb("ac_v4_skill_reminder_bot.db");
+  REQUIRE(db::open(path.string()));
+  auto keeper = db::createBot(db::Bot{0, "默认", "🤖", "", "人设"});   // 首个 Bot 为默认，不可删
+  auto victim = db::createBot(db::Bot{0, "待删", "🤖", "", "人设"});
+  REQUIRE(keeper.id > 0);
+  REQUIRE(victim.id > 0);
+  auto r = sk::execute("reminder", {{"content", "级联测试"},
+                                    {"due_at", "2099-01-01T00:00:00Z"},
+                                    {"bot_id", victim.id}});
+  REQUIRE(r.value("ok", false) == true);
+  auto all = db::listReminders(false);
+  REQUIRE(all.size() == 1);
+  CHECK(all[0].bot_id == victim.id);                    // 不再是原先的 bot_id=0
+  CHECK(all[0].due_at == "2099-01-01T00:00:00Z");
+  CHECK(db::deleteBot(victim.id));
+  CHECK(db::listReminders(false).empty());              // deleteBot 级联在真实路径生效
+  db::close();
+  std::filesystem::remove(path);
+}
+
+TEST_CASE("skills_exec: reminder 无法解析 due_at 时不写库") {
+  auto path = tmpDb("ac_v4_skill_reminder_bad.db");
+  REQUIRE(db::open(path.string()));
+  auto r = sk::execute("reminder", {{"content", "坏时间"}, {"due_at", "明天见"}});
+  CHECK(r.contains("error"));
+  CHECK_FALSE(r.contains("ok"));
+  CHECK(r["error"].get<std::string>().find("due_at") != std::string::npos);
+  CHECK(db::listReminders(false).empty());              // 失败绝不写库
+  // 整数 due_at 等价于「N 分钟」，且入库值是归一化后的 UTC ISO
+  auto num = sk::execute("reminder", {{"content", "数字分钟"}, {"due_at", 30}});
+  CHECK(num.value("ok", false) == true);
+  auto list = db::listReminders(false);
+  REQUIRE(list.size() == 1);
+  CHECK(list[0].due_at.size() == 20);
+  CHECK(list[0].due_at > nowIso());
+  CHECK(num.value("due_at", "") == list[0].due_at);
+  db::close();
+  std::filesystem::remove(path);
+}
+
+TEST_CASE("skills_exec: reminder 注册表描述披露相对分钟") {
+  bool found = false;
+  for (auto& s : sk::registry()) {
+    if (s.id != "reminder") continue;
+    found = true;
+    auto desc = s.params_schema["properties"]["due_at"]["description"].get<std::string>();
+    CHECK(desc.find("ISO 8601") != std::string::npos);
+    CHECK(desc.find("相对分钟") != std::string::npos);
+  }
+  CHECK(found);
+}

@@ -302,20 +302,197 @@ json execReminder(const json& params) {
   std::string content;
   if (params.contains("content") && params["content"].is_string())
     content = params["content"].get<std::string>();
-  std::string due;
-  if (params.contains("due_at") && params["due_at"].is_string())
-    due = params["due_at"].get<std::string>();
-  if (content.empty() || due.empty()) return {{"error", "content/due_at 不能为空"}};
+  std::string rawDue;
+  if (params.contains("due_at")) {
+    // LLM 也可能把「30 分钟后」写成数字 30：整数按分钟数处理，与纯数字形式同义
+    if (params["due_at"].is_string()) rawDue = params["due_at"].get<std::string>();
+    else if (params["due_at"].is_number_integer())
+      rawDue = std::to_string(params["due_at"].get<int64_t>());
+  }
+  if (content.empty() || rawDue.empty()) return {{"error", "content/due_at 不能为空"}};
+  // §7.2「解析时间（相对分钟或绝对时间）」：入库前归一化成 UTC ISO，
+  // 否则 db::listReminders 的 due_at <= nowIso() 字符串比较永远不成立
+  std::string due = normalizeDueAt(rawDue);
+  if (due.empty())
+    return {{"error", "due_at 无法解析（支持 ISO 8601 或相对分钟，如 15分钟后）"}};
   try {
     int64_t botId = params.contains("bot_id") && params["bot_id"].is_number()
                         ? params["bot_id"].get<int64_t>()
                         : 0;
     auto r = db::addReminder(botId, content, due);
     if (r.id <= 0) return {{"error", "提醒写入失败"}};
-    return {{"ok", true}, {"id", r.id}};
+    return {{"ok", true}, {"id", r.id}, {"due_at", due}};
   } catch (const std::exception& e) {
     return {{"error", std::string("提醒写入失败：") + e.what()}};
   }
+}
+
+// ---------- due_at 解析辅助（纯计算，无副作用）----------
+std::string trimCopy(const std::string& s) {
+  size_t b = 0, e = s.size();
+  while (b < e && (s[b] == ' ' || s[b] == '\t' || s[b] == '\r' || s[b] == '\n')) ++b;
+  while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\r' ||
+                   s[e - 1] == '\n'))
+    --e;
+  return s.substr(b, e - b);
+}
+
+std::string asciiLower(const std::string& s) {
+  std::string out;
+  for (unsigned char c : s)
+    out += static_cast<char>(c < 0x80 ? std::tolower(c) : c);   // 非 ASCII 字节原样保留
+  return out;
+}
+
+bool readFixedDigits(const std::string& s, size_t& i, int n, int& out) {
+  if (i + static_cast<size_t>(n) > s.size()) return false;
+  int v = 0;
+  for (int k = 0; k < n; ++k) {
+    if (!std::isdigit(static_cast<unsigned char>(s[i + k]))) return false;
+    v = v * 10 + (s[i + k] - '0');
+  }
+  i += static_cast<size_t>(n);
+  out = v;
+  return true;
+}
+
+bool leapYear(int y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
+
+bool validCivil(int y, int mo, int d, int h, int mi, int sec) {
+  static const int kDays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  if (y < 1970 || y > 9999) return false;
+  if (mo < 1 || mo > 12 || d < 1) return false;
+  int lim = kDays[mo - 1] + (mo == 2 && leapYear(y) ? 1 : 0);
+  if (d > lim) return false;
+  return h >= 0 && h <= 23 && mi >= 0 && mi <= 59 && sec >= 0 && sec <= 59;
+}
+
+// 民历日 → Unix 纪元日数（Howard Hinnant days_from_civil，不依赖 CRT 时区）
+int64_t daysFromCivil(int y, int mo, int d) {
+  y -= mo <= 2;
+  const int era = (y >= 0 ? y : y - 399) / 400;
+  const unsigned yoe = static_cast<unsigned>(y - era * 400);
+  const unsigned mp = static_cast<unsigned>(mo + (mo > 2 ? -3 : 9));
+  const unsigned doy = (153 * mp + 2) / 5 + static_cast<unsigned>(d) - 1;
+  const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return static_cast<int64_t>(era) * 146097 + static_cast<int64_t>(doe) - 719468;
+}
+
+// 与 json_util.h 的 nowIso() 逐字符同格式：%Y-%m-%dT%H:%M:%SZ（UTC、秒、尾 Z）
+std::string isoFromEpoch(std::time_t t) {
+  std::tm tm{};
+  if (gmtime_s(&tm, &t) != 0) return {};
+  char buf[32];
+  if (std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm) == 0) return {};
+  return buf;
+}
+
+bool inEpochRange(int64_t epoch) { return epoch >= 0 && epoch < 4102444800LL; }  // 1970..2100
+
+// 绝对时间：YYYY-MM-DD[T ]HH:MM[:SS][.fff][Z|±HH:MM]，无时区标记按本地时间→UTC
+bool parseAbsoluteDue(const std::string& s, std::time_t& out) {
+  size_t i = 0;
+  int y = 0, mo = 0, d = 0, h = 0, mi = 0, sec = 0;
+  if (!readFixedDigits(s, i, 4, y)) return false;
+  if (i >= s.size() || s[i] != '-') return false;
+  ++i;
+  if (!readFixedDigits(s, i, 2, mo)) return false;
+  if (i >= s.size() || s[i] != '-') return false;
+  ++i;
+  if (!readFixedDigits(s, i, 2, d)) return false;
+  if (i < s.size() && (s[i] == 'T' || s[i] == 't' || s[i] == ' ')) {
+    ++i;
+    if (i >= s.size() || !std::isdigit(static_cast<unsigned char>(s[i]))) return false;
+    if (!readFixedDigits(s, i, 2, h)) return false;      // 至少到分
+    if (i >= s.size() || s[i] != ':') return false;
+    ++i;
+    if (!readFixedDigits(s, i, 2, mi)) return false;
+    if (i < s.size() && s[i] == ':') {
+      ++i;
+      if (!readFixedDigits(s, i, 2, sec)) return false;
+    }
+    if (i < s.size() && s[i] == '.') {                   // 小数秒：吃掉但不参与
+      ++i;
+      size_t st = i;
+      while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) ++i;
+      if (i == st) return false;
+    }
+  }
+  if (!validCivil(y, mo, d, h, mi, sec)) return false;
+  int64_t epoch = daysFromCivil(y, mo, d) * 86400 + h * 3600 + mi * 60 + sec;
+  if (i < s.size()) {
+    if (s[i] == 'Z' || s[i] == 'z') {                    // 显式 UTC
+      ++i;
+    } else if (s[i] == '+' || s[i] == '-') {             // 显式偏移
+      char sign = s[i];
+      ++i;
+      int oh = 0, om = 0;
+      if (!readFixedDigits(s, i, 2, oh)) return false;
+      if (i < s.size() && s[i] == ':') ++i;
+      if (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) {
+        if (!readFixedDigits(s, i, 2, om)) return false;
+      }
+      if (oh > 23 || om > 59) return false;
+      int64_t off = oh * 3600 + om * 60;
+      epoch -= (sign == '-' ? -off : off);
+    } else {
+      return false;
+    }
+    if (i != s.size()) return false;                     // 尾部有杂项
+    if (!inEpochRange(epoch)) return false;
+    out = static_cast<std::time_t>(epoch);
+    return true;
+  }
+  // 无时区标记：按本地时间解释后转 UTC（mktime 依系统时区/DST 换算，再 gmtime_s 出 UTC 串）
+  std::tm t{};
+  t.tm_year = y - 1900;
+  t.tm_mon = mo - 1;
+  t.tm_mday = d;
+  t.tm_hour = h;
+  t.tm_min = mi;
+  t.tm_sec = sec;
+  t.tm_isdst = -1;
+  std::time_t local = std::mktime(&t);
+  if (local == static_cast<std::time_t>(-1)) return false;
+  if (!inEpochRange(static_cast<int64_t>(local))) return false;
+  out = static_cast<std::time_t>(local);
+  return true;
+}
+
+// 相对时间：N分钟后 / N 分钟后 / in N minutes / +Nm / N（分钟）；Nh、N小时后按小时；
+// N分钟前、N小时前为过去（等价于立刻到期）
+bool parseRelativeDue(const std::string& in, std::time_t now, std::time_t& out) {
+  std::string s = asciiLower(trimCopy(in));
+  size_t i = 0;
+  if (s.compare(0, 3, "in ") == 0) i = 3;
+  if (i < s.size() && s[i] == '+') ++i;
+  while (i < s.size() && s[i] == ' ') ++i;
+  size_t ds = i;
+  while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) ++i;
+  if (i == ds || i - ds > 6) return false;               // 超长数字不是分钟数
+  int64_t n = 0;
+  for (size_t k = ds; k < i; ++k) n = n * 10 + (s[k] - '0');
+  size_t us = i;
+  while (us < s.size() && s[us] == ' ') ++us;
+  std::string unit = s.substr(us);
+  int64_t sec = -1;
+  if (unit.empty() || unit == "m" || unit == "min" || unit == "mins" ||
+      unit == "minute" || unit == "minutes" || unit == "分钟后" ||
+      unit == "分钟" || unit == "分")
+    sec = n * 60;
+  else if (unit == "h" || unit == "hr" || unit == "hrs" || unit == "hour" ||
+           unit == "hours" || unit == "小时后" || unit == "小时" || unit == "钟头")
+    sec = n * 3600;
+  else if (unit == "分钟前")
+    sec = -n * 60;
+  else if (unit == "小时前")
+    sec = -n * 3600;
+  else
+    return false;
+  int64_t epoch = static_cast<int64_t>(now) + sec;
+  if (!inEpochRange(epoch)) return false;
+  out = static_cast<std::time_t>(epoch);
+  return true;
 }
 
 }  // namespace
@@ -373,6 +550,17 @@ bool isBlockedHost(const std::string& host) {
   return false;
 }
 
+// due_at 归一化：把绝对 ISO 8601 / 本地墙钟 / 相对分钟等写法统一成与 nowIso()
+// 逐字符兼容的 UTC 字符串（"%Y-%m-%dT%H:%M:%SZ"），解析失败返回空串。
+std::string normalizeDueAt(const std::string& in) {
+  std::string s = trimCopy(in);
+  if (s.empty()) return {};
+  std::time_t t = 0;
+  if (parseAbsoluteDue(s, t)) return isoFromEpoch(t);
+  if (parseRelativeDue(s, std::time(nullptr), t)) return isoFromEpoch(t);
+  return {};
+}
+
 std::vector<SkillDef> registry() {
   return {
       {"calculator", "计算器", "四则运算表达式求值（仅支持 + - * / 括号与数字）",
@@ -397,8 +585,10 @@ std::vector<SkillDef> registry() {
        json{{"type", "object"},
             {"properties",
              json{{"content", json{{"type", "string"}}},
-                  {"due_at", json{{"type", "string"},
-                                  {"description", "ISO 8601 时间字符串"}}}}},
+                  {"due_at",
+                   json{{"type", "string"},
+                        {"description",
+                         "支持 ISO 8601 或相对分钟（例如 15分钟后 / 30）"}}}}},
             {"required", json::array({"content", "due_at"})}}},
   };
 }
