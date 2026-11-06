@@ -3,6 +3,11 @@
 
 const API_BASE = (window.__API_BASE__ || 'http://127.0.0.1:8765').replace(/\/$/, '');
 
+function botAvatarHtml(b, cls = 'avatar-img') {
+  if (b && b.avatar_url) return `<img class="${cls}" src="${API_BASE}/api/v1/bots/${b.id}/avatar">`;
+  return `<span class="${cls}">${escapeHtml(b?.avatar || '🤖')}</span>`;
+}
+
 const $ = (id) => document.getElementById(id);
 const inputEl = $('input');
 const messagesEl = $('messages');
@@ -178,6 +183,8 @@ const App = {
     groupTurn: 0,
     typers: new Map(),
     gmsgSeen: new Set(),
+    botAvatarFile: null,
+    botAvatarRemove: false,
   },
   commands: new Map(),
   registerCommand(name, fn) { this.commands.set(name, fn); },
@@ -206,6 +213,7 @@ const App = {
     get: (p) => App.api.req('GET', p),
     post: (p, b) => App.api.req('POST', p, b),
     patch: (p, b) => App.api.req('PATCH', p, b),
+    put: (p, b) => App.api.req('PUT', p, b),
     del: (p) => App.api.req('DELETE', p),
   },
 };
@@ -314,9 +322,9 @@ function updateChatSub(sid) {
   if (!s) { $('chat-sub').textContent = ''; return; }
   if (s.bot_id > 0) {
     const b = App.state.bots.find((x) => x.id === s.bot_id);
-    $('chat-sub').textContent = b ? `与 ${b.name} 对话` : '与默认机器人对话';
+    $('chat-sub').textContent = b ? `与 ${b.name} 对话` : '与默认 Bot 对话';
   } else {
-    $('chat-sub').textContent = '与默认机器人对话';
+    $('chat-sub').textContent = '与默认 Bot 对话';
   }
 }
 
@@ -378,12 +386,12 @@ App.registerCommand('new-session', () => {
   const box = $('ns-bots');
   box.innerHTML = '';
   const enabled = App.state.bots.filter((b) => b.is_enabled);
-  if (!enabled.length) { toast('没有可用的机器人，请先在「机器人」页创建或启用'); return; }
+  if (!enabled.length) { toast('没有可用的 Bot，请先在「Bot」页创建或启用'); return; }
   for (const b of enabled) {
     const label = document.createElement('label');
     label.className = 'ns-bot' + (b.id === App.state.defaultBotId ? ' checked' : '');
     label.innerHTML = `<input type="radio" name="ns-bot" value="${b.id}" ${b.id === App.state.defaultBotId ? 'checked' : ''}>
-      <span class="member-avatar">${escapeHtml(b.avatar)}</span>
+      <span class="member-avatar">${botAvatarHtml(b)}</span>
       <span class="member-name">${escapeHtml(b.name)}</span>`;
     box.appendChild(label);
   }
@@ -399,7 +407,7 @@ App.registerCommand('switch-session-bot', () => {
 
 App.registerCommand('save-new-session', async () => {
   const checked = $('ns-bots').querySelector('input:checked');
-  if (!checked) { toast('请选择一个机器人'); return; }
+  if (!checked) { toast('请选择一个 Bot'); return; }
   const botId = Number(checked.value);
   const mode = $('modal-new-session').dataset.mode;
   $('modal-new-session').classList.add('hidden');
@@ -408,7 +416,7 @@ App.registerCommand('save-new-session', async () => {
     if (!sid) return;
     await App.api.patch(`/api/v1/sessions/${sid}`, { bot_id: botId });
     updateChatSub(sid);
-    toast('已切换机器人');
+    toast('已切换 Bot');
   } else {
     const s = await App.api.post('/api/v1/sessions', { bot_id: botId });
     await refreshSessions();
@@ -537,7 +545,7 @@ function renderBots() {
     const item = document.createElement('div');
     item.className = 'list-item' + (b.id === App.state.selectedBotId ? ' active' : '');
     item.innerHTML = `
-      <div class="list-item-avatar">${escapeHtml(b.avatar)}</div>
+      <div class="list-item-avatar">${botAvatarHtml(b)}</div>
       <div class="list-item-body">
         <div class="list-item-title">${escapeHtml(b.name)}${b.id === App.state.defaultBotId ? '<span class="tag">默认</span>' : ''}</div>
         <div class="list-item-sub">${b.is_enabled ? '' : '已停用 · '}${escapeHtml(b.api_base_url || '默认 API')}</div>
@@ -566,7 +574,7 @@ function renderBotDetail() {
   if (!b) { detail.classList.add('hidden'); return; }
   detail.classList.remove('hidden');
   $('btn-bot-delete').classList.toggle('hidden', b.id === App.state.defaultBotId);
-  $('bot-detail-avatar').textContent = b.avatar;
+  $('bot-detail-avatar').innerHTML = botAvatarHtml(b, 'bot-detail-avatar');
   $('bot-detail-name').textContent = b.name + (b.id === App.state.defaultBotId ? '（默认）' : '');
   $('bot-detail-sub').textContent = b.is_enabled ? '已启用' : '已停用';
   $('bot-detail-prompt').textContent = b.system_prompt;
@@ -578,12 +586,20 @@ function renderBotDetail() {
 }
 
 App.registerCommand('open-bot-editor', (b) => {
-  $('bot-modal-title').textContent = b ? '编辑机器人' : '新建机器人';
+  $('bot-modal-title').textContent = b ? '编辑 Bot' : '新建 Bot';
   $('be-name').value = b?.name || '';
   $('be-avatar').value = b?.avatar || '🤖';
   $('be-greeting').value = b?.greeting || '';
   $('be-prompt').value = b?.system_prompt || '';
   $('be-temp').value = b?.temperature ?? 0.8;
+  $('be-max-tokens').value = b?.max_tokens ?? 2048;
+  $('be-api-type').value = b?.api_type || 'openai';
+  $('be-avatar-file').value = '';
+  App.state.botAvatarFile = null;
+  App.state.botAvatarRemove = false;
+  const prev = $('be-avatar-preview');
+  prev.classList.toggle('hidden', !(b?.avatar_url));
+  if (b?.avatar_url) $('be-avatar-img').src = `${API_BASE}/api/v1/bots/${b.id}/avatar`;
   $('be-api-base').value = b?.api_base_url || '';
   $('be-api-key').value = '';
   $('be-api-key').placeholder = b?.api_key ? `当前 Key：${b.api_key}（留空保持不变）` : '留空 = 使用默认 Key';
@@ -603,26 +619,36 @@ App.registerCommand('save-bot', async () => {
     greeting: $('be-greeting').value.trim(),
     system_prompt: prompt,
     temperature: Number($('be-temp').value) || 0.8,
+    max_tokens: Number($('be-max-tokens').value) || 2048,
+    api_type: $('be-api-type').value,
     api_base_url: $('be-api-base').value.trim(),
     api_model: $('be-api-model').value.trim(),
   };
   if ($('be-key-clear').checked) body.api_key = '';
   else if ($('be-api-key').value.trim()) body.api_key = $('be-api-key').value.trim();
   const id = $('modal-bot').dataset.botId;
-  if (id) await App.api.patch(`/api/v1/bots/${id}`, body);
-  else await App.api.post('/api/v1/bots', body);
+  let saved;
+  if (id) saved = await App.api.patch(`/api/v1/bots/${id}`, body);
+  else saved = await App.api.post('/api/v1/bots', body);
+  const savedId = saved.id;
+  if (App.state.botAvatarRemove && savedId) {
+    // 移除图片：PATCH 清空 avatar_path（Task 5 已支持直通），回到 emoji 头像
+    await App.api.patch(`/api/v1/bots/${savedId}`, { avatar_path: '' });
+  } else if (App.state.botAvatarFile && savedId) {
+    await App.api.post(`/api/v1/bots/${savedId}/avatar`, { image_base64: App.state.botAvatarFile });
+  }
   $('modal-bot').classList.add('hidden');
   await refreshBots();
-  toast('机器人已保存');
+  toast('Bot 已保存');
 });
 
 App.registerCommand('delete-bot', async (id) => {
   const b = App.state.bots.find((x) => x.id === id);
-  if (!confirm(`删除机器人「${b?.name || ''}」？`)) return;
+  if (!confirm(`删除 Bot「${b?.name || ''}」？`)) return;
   try {
     await App.api.del(`/api/v1/bots/${id}`);
   } catch (e) {
-    toast(e.code === 1001 ? '默认机器人不可删除' : e.message);
+    toast(e.code === 1001 ? '默认 Bot 不可删除' : e.message);
     return;
   }
   await refreshBots();
@@ -668,9 +694,11 @@ function addGroupBubble(botId, name, avatar, text, opts = {}) {
   const bubble = document.createElement('div');
   bubble.className = 'gmsg' + (botId === 0 ? ' gmsg-user' : '');
   if (opts.id) bubble.dataset.gmsgId = opts.id;
+  const av = opts.avatarUrl
+    ? `<img class="avatar-img" src="${API_BASE}/api/v1/bots/${botId}/avatar">`
+    : `<span class="gmsg-avatar">${escapeHtml(avatar)}</span>`;
   bubble.innerHTML = `
-    <div class="gmsg-head">
-      <span class="gmsg-avatar">${escapeHtml(avatar)}</span>
+    <div class="gmsg-head">${av}
       <span class="gmsg-name">${escapeHtml(name)}</span>
       ${opts.id && !opts.streaming ? '<div class="gmsg-meta"><button data-action="copy" title="复制">📋</button></div>' : ''}
     </div>
@@ -696,7 +724,7 @@ function addGroupBubble(botId, name, avatar, text, opts = {}) {
 function addGroupBubbleChecked(botId, name, avatar, text, opts = {}) {
   if (opts.id && App.state.gmsgSeen.has(opts.id)) return null;
   if (opts.id) App.state.gmsgSeen.add(opts.id);
-  return addGroupBubble(botId, name, avatar, text, opts);
+  return addGroupBubble(botId, name, avatar, text, { ...opts, avatarUrl: opts.avatarUrl });
 }
 
 function addGroupNote(text) {
@@ -764,7 +792,7 @@ async function reconcileGroupMessages() {
     el.innerHTML = '';
     App.state.gmsgSeen.clear();
     for (const m of [...msgs].reverse()) {
-      addGroupBubbleChecked(m.bot_id, m.name, m.avatar, m.content, { id: m.id });
+      addGroupBubbleChecked(m.bot_id, m.name, m.avatar, m.content, { id: m.id, avatarUrl: m.avatar_url });
     }
     scrollGroupToBottom();
   } catch (_) {}
@@ -784,7 +812,7 @@ function ensureTyper(obj) {
   const key = obj.bot_id;
   let t = App.state.typers.get(key);
   if (!t) {
-    const b = addGroupBubble(key, obj.name || '机器人', obj.avatar || '🤖', '', { streaming: true });
+    const b = addGroupBubble(key, obj.name || 'Bot', obj.avatar || '🤖', '', { streaming: true, avatarUrl: obj.avatar_url });
     const tw = new Typewriter(b.contentEl, () => {});
     t = { bubble: b, tw, full: '' };
     App.state.typers.set(key, t);
@@ -824,7 +852,7 @@ function handleGroupEvent(ev, obj) {
     scrollGroupToBottom();
   } else if (ev === 'error') {
     finishTyper(obj.bot_id);
-    addGroupNote(`⚠ ${obj.name || '机器人'} 回复失败：${obj.message || ''}`);
+    addGroupNote(`⚠ ${obj.name || 'Bot'} 回复失败：${obj.message || ''}`);
   }
 }
 
@@ -951,7 +979,7 @@ App.registerCommand('show-group-members', () => {
   for (const m of g.members || []) {
     const row = document.createElement('div');
     row.className = 'gm-row';
-    row.innerHTML = `<span class="gmsg-avatar">${escapeHtml(m.avatar)}</span>
+    row.innerHTML = `<span class="gmsg-avatar">${botAvatarHtml({ id: m.bot_id, avatar: m.avatar, avatar_url: m.avatar_url })}</span>
       <span class="gm-name">${escapeHtml(m.name)}</span>
       ${m.is_enabled ? '' : '<span class="tag">已停用</span>'}`;
     box.appendChild(row);
@@ -973,7 +1001,7 @@ App.registerCommand('open-group-editor', async (g) => {
     const label = document.createElement('label');
     label.className = 'member-check' + (b.is_enabled ? '' : ' disabled');
     label.innerHTML = `<input type="checkbox" value="${b.id}" ${memberIds.has(b.id) ? 'checked' : ''} ${b.is_enabled ? '' : 'disabled'}>
-      <span class="member-avatar">${escapeHtml(b.avatar)}</span>
+      <span class="member-avatar">${botAvatarHtml(b)}</span>
       <span class="member-name">${escapeHtml(b.name)}${b.is_enabled ? '' : '（已停用）'}</span>`;
     box.appendChild(label);
   }
@@ -985,7 +1013,7 @@ App.registerCommand('save-group', async () => {
   const name = $('ge-name').value.trim();
   if (!name) { toast('群名称不能为空'); return; }
   const ids = [...$('ge-members').querySelectorAll('input:checked')].map((c) => Number(c.value));
-  if (ids.length < 2 || ids.length > 10) { toast('请选择 2-10 个机器人'); return; }
+  if (ids.length < 2 || ids.length > 10) { toast('请选择 2-10 个 Bot'); return; }
   const id = $('modal-group').dataset.groupId;
   const body = { name, topic: $('ge-topic').value.trim(), bot_ids: ids };
   if (id) {
@@ -1204,4 +1232,28 @@ $('bot-list').addEventListener('change', async (e) => {
     t.checked = !t.checked;
     toast(err.message);
   }
+});
+
+$('be-avatar-file').addEventListener('change', async () => {
+  const f = $('be-avatar-file').files[0];
+  if (!f) return;
+  if (f.size > 256 * 1024) { toast('图片超过 256KB'); return; }
+  const img = new Image();
+  img.onload = () => {
+    const c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const g = c.getContext('2d');
+    g.drawImage(img, 0, 0, 128, 128);
+    App.state.botAvatarFile = c.toDataURL('image/png').split(',')[1];
+    App.state.botAvatarRemove = false;
+    $('be-avatar-img').src = c.toDataURL('image/png');
+    $('be-avatar-preview').classList.remove('hidden');
+  };
+  img.src = URL.createObjectURL(f);
+});
+$('btn-avatar-remove').addEventListener('click', () => {
+  App.state.botAvatarFile = null;
+  App.state.botAvatarRemove = true;
+  $('be-avatar-preview').classList.add('hidden');
+  $('be-avatar-file').value = '';
 });

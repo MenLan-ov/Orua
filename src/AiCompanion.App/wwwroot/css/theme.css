@@ -384,3 +384,10 @@ label.chk input { width: auto; }
 }
 .msg-content p, .gmsg-content p { margin: 4px 0; }
 .msg-content ul, .gmsg-content ul, .msg-content ol, .gmsg-content ol { padding-left: 20px; }
+
+/* ============ 头像 ============ */
+.avatar-preview { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.avatar-preview img { width: 48px; height: 48px; border-radius: 12px; object-fit: cover; }
+.avatar-img { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
+.list-item-avatar img.avatar-img, .member-avatar img.avatar-img { border-radius: 10px; }
+.bot-detail-avatar img { width: 56px; height: 56px; border-radius: 14px; }
