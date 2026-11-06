@@ -1582,9 +1582,8 @@ App.registerCommand('backend-status', (p) => {
 
 /* 提醒到期提示：仅主窗口轮询，toast 走 textContent 渲染，故直接传原文不做转义 */
 const REMINDER_POLL_MS = 15000;
-// toast() 是单元素、后写覆盖前写：一轮最多逐条提示这么多条，其余合并成一条计数提示，
-// 否则一次 tick 里多条到期只有最后一条看得见，前面的却已被标记完成（静默丢失）。
-const REMINDER_TOAST_MAX = 2;
+// toast() 是单元素、后写覆盖前写，浏览器也不会在同步 tick 中间上色：一轮里只有最后一次 toast()
+// 看得见。所以每个 tick 只呈现最早一条，其余留到下一个 15s tick 逐条消化。
 const remindersSurfaced = new Set();
 let reminderPolling = false;
 let reminderTimer = null;
@@ -1605,27 +1604,15 @@ async function reminderTick() {
     const fresh = (((res && res.reminders) || []).filter((r) => !remindersSurfaced.has(r.id)))
       .sort((a, b) => String(a.due_at || '').localeCompare(String(b.due_at || '')));
     if (!fresh.length) return;
-    const head = fresh.slice(0, REMINDER_TOAST_MAX);
-    const rest = fresh.slice(REMINDER_TOAST_MAX);
-    const shown = [];
-    for (const r of head) {
-      const bot = App.state.bots.find((b) => b.id === r.bot_id);
-      if (surfaceToast(bot ? `${bot.name}提醒你：${r.content}` : `提醒你：${r.content}`)) {
-        remindersSurfaced.add(r.id);
-        shown.push(r.id);
-      }
-    }
-    // 剩余条合并为一条计数提示：合并 toast 覆盖了它们，才视为已呈现
-    if (rest.length && surfaceToast(`另有 ${rest.length} 条到期提醒`)) {
-      for (const r of rest) {
-        remindersSurfaced.add(r.id);
-        shown.push(r.id);
-      }
-    }
+    const [first, ...rest] = fresh;
+    const bot = App.state.bots.find((b) => b.id === first.bot_id);
+    const base = bot ? `${bot.name}提醒你：${first.content}` : `提醒你：${first.content}`;
+    const msg = rest.length ? `${base}（另有 ${rest.length} 条待提醒）` : base;
+    // 未见不标 done：文案没落到 toast 上就整轮不记账，这条下一轮还会再提示
+    if (!surfaceToast(msg)) return;
+    remindersSurfaced.add(first.id);
     // 先记账再标 done：POST 失败也只是本会话不再重复提示，绝不死循环刷屏
-    for (const id of shown) {
-      try { await App.api.post(`/api/v1/reminders/${id}/done`); } catch (_) {}
-    }
+    try { await App.api.post(`/api/v1/reminders/${first.id}/done`); } catch (_) {}
   } catch (_) {
   } finally {
     reminderPolling = false;
