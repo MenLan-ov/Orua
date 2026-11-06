@@ -1400,10 +1400,15 @@ App.registerCommand('boot', async () => {
       try {
         const msgs = await App.api.get(`/api/v1/messages?session_id=${sid}&limit=100`);
         if (App.state.currentSessionId !== sid) return;
-        const key = `${msgs.length}:${msgs.length ? msgs[0].id : 0}`;
+        const first = msgs[0] || {};
+        const key = `${msgs.length}:${first.id || 0}:${(first.content || '').length}`;
         if (key === seenKey) return;
-        // boot 的 select-session 已经画过一遍：首 tick 只记基线，别为此重绘一次气泡
-        if (seenKey === null && messagesEl.childElementCount > 0) { seenKey = key; return; }
+        // boot 已画过一遍：首 tick 以 DOM 实际渲染的最新消息对齐服务端快照，一致才记基线，间隙新落库的消息不会被跳过
+        if (seenKey === null) {
+          const ids = messagesEl.querySelectorAll('.msg[data-msg-id]');
+          const lastId = ids.length ? Number(ids[ids.length - 1].dataset.msgId) : 0;
+          if (lastId && `${msgs.length}:${lastId}:${(first.content || '').length}` === key) { seenKey = key; return; }
+        }
         const stick = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 40;
         const top = messagesEl.scrollTop;
         await loadMessages(sid);
