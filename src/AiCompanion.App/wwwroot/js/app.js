@@ -401,6 +401,7 @@ async function renderChatList() {
         <div class="list-item-title-row">
           ${isPinned(it.kind, it.id) ? '<span class="pin-icon">📌</span>' : ''}
           <span>${escapeHtml(it.name)}</span>
+          ${it.kind === 'group' && it.group && it.group.status === 'running' ? '<span class="badge-running">进行中</span>' : ''}
         </div>
         <div class="list-item-preview">${escapeHtml(it.preview)}</div>
       </div>
@@ -1248,10 +1249,11 @@ App.registerCommand('open-context-menu', (kind, id, x, y) => {
       const b = App.state.bots.find((x) => x.id === id);
       if (!b) return;
       defaultSessionFor(b).then((s) => {
-        if (s) winMsg('opendetach', { target: `session:${s.id}` });
+        if (s) winMsg('opendetach', { target: `session:${s.id}`, name: b.name });
       });
     } else {
-      winMsg('opendetach', { target: `group:${id}` });
+      const g = App.state.groups.find((x) => x.id === id);
+      winMsg('opendetach', { target: `group:${id}`, name: (g && g.name) || '' });
     }
   };
 

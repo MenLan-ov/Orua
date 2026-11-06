@@ -12,6 +12,7 @@ namespace AiCompanion.App;
 public partial class MainWindow : Window
 {
     private const string DetachTargetPattern = @"\A(session|group):\d+\z";
+    private const int DetachTitleMaxLength = 40;
 
     private BackendProcess? _backend;
     private readonly Dictionary<string, ChatWindow> _detached = new();
@@ -122,15 +123,23 @@ public partial class MainWindow : Window
                     case BridgeProtocol.ActionSysMenu: ShowSystemMenu(); break;
                     case BridgeProtocol.ActionOpenDetach:
                         {
-                            var target = doc.RootElement.GetProperty("payload")
-                                .GetProperty("target").GetString();
+                            var payload = doc.RootElement.GetProperty("payload");
+                            var target = payload.GetProperty("target").GetString();
                             if (string.IsNullOrEmpty(target)) break;
                             if (!Regex.IsMatch(target, DetachTargetPattern)) break;
+                            string? rawName = null;
+                            if (payload.TryGetProperty("name", out var nameEl) &&
+                                nameEl.ValueKind == JsonValueKind.String)
+                                rawName = nameEl.GetString();
+                            var title = SanitizeDetachTitle(rawName);
                             if (_detached.TryGetValue(target, out var existing)) {
+                                // T8 M1：最小化的旧窗口要先恢复，否则 Activate 看似调用成功但窗口仍不可见
+                                if (existing.WindowState == WindowState.Minimized)
+                                    existing.WindowState = WindowState.Normal;
                                 existing.Activate();
                                 break;
                             }
-                            var w = new ChatWindow(target, _backend?.ApiPort ?? ReadApiPort());
+                            var w = new ChatWindow(target, _backend?.ApiPort ?? ReadApiPort(), title);
                             _detached[target] = w;
                             w.Closed += (_, _) => _detached.Remove(target);
                             w.Show();
@@ -140,6 +149,17 @@ public partial class MainWindow : Window
             });
         }
         catch { }
+    }
+
+    /// <summary>独立窗口标题：剔除控制字符并截断到 40 字符；空名返回空串，由 ChatWindow 自行回退通用文案。</summary>
+    private static string SanitizeDetachTitle(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return "";
+        var sb = new System.Text.StringBuilder(name.Length);
+        foreach (var ch in name)
+            if (!char.IsControl(ch)) sb.Append(ch);
+        var text = sb.ToString().Trim();
+        return text.Length > DetachTitleMaxLength ? text[..DetachTitleMaxLength] : text;
     }
 
     // 标题栏交互：v1 的 WM_NCHITTEST→HTCAPTION 方案失效——鼠标按下命中 WebView2

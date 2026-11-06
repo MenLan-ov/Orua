@@ -12,11 +12,14 @@ public partial class ChatWindow : Window
 {
     private readonly string _target;
 
-    public ChatWindow(string target, int apiPort)
+    public ChatWindow(string target, int apiPort, string? title = null)
     {
         InitializeComponent();
         _target = target;
-        Title = target.StartsWith("group:") ? "群聊" : "聊天";
+        // 标题优先用前端传来的显示名（Bot 名/群名，已在壳侧做无害化）；缺失时回退通用文案
+        Title = string.IsNullOrWhiteSpace(title)
+            ? (target.StartsWith("group:", StringComparison.Ordinal) ? "群聊" : "聊天")
+            : title.Trim();
         _apiPort = apiPort;
     }
 
