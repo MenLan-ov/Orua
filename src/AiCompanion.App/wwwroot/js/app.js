@@ -1157,6 +1157,118 @@ App.registerCommand('delete-group', async (id) => {
   renderChatList();
 });
 
+/* ================= 右键菜单 ================= */
+// 菜单打开时的固定定位矩形：ctxItemEl 点击会先 closeContextMenus()（display:none 后
+// getBoundingClientRect 归零），历史会话子菜单需要以此矩形定位
+let ctxMenuRect = null;
+function closeContextMenus() {
+  $('ctx-menu').classList.add('hidden');
+  $('ctx-menu').innerHTML = '';
+  const sub = document.getElementById('ctx-sub');
+  if (sub) sub.remove();
+}
+function ctxItemEl(label, onClick, opts = {}) {
+  const el = document.createElement('div');
+  el.className = 'ctx-item' + (opts.danger ? ' danger' : '');
+  el.innerHTML = `<span>${opts.icon || '·'}</span><span>${escapeHtml(label)}</span>`;
+  el.onclick = () => { closeContextMenus(); onClick(); };
+  return el;
+}
+function ctxSepEl() {
+  const el = document.createElement('div');
+  el.className = 'ctx-sep';
+  return el;
+}
+App.registerCommand('open-context-menu', (kind, id, x, y) => {
+  closeContextMenus();
+  const menu = $('ctx-menu');
+  menu.classList.remove('hidden');
+  menu.style.left = Math.min(x, window.innerWidth - 220) + 'px';
+  menu.style.top = Math.min(y, window.innerHeight - 320) + 'px';
+  ctxMenuRect = menu.getBoundingClientRect();
+
+  const togglePin = async () => {
+    const i = App.state.pinned.findIndex((p) => p.kind === kind && p.id === id);
+    if (i >= 0) App.state.pinned.splice(i, 1);
+    else App.state.pinned.push({ kind, id });
+    await savePinned();
+    renderChatList();
+  };
+  const markUnread = async () => {
+    delete App.state.reads[`${kind}:${id}`];
+    await saveReads();
+    renderChatList();
+  };
+  const openDetached = () => {
+    if (kind === 'bot') {
+      const b = App.state.bots.find((x) => x.id === id);
+      if (!b) return;
+      defaultSessionFor(b).then((s) => {
+        if (s) winMsg('opendetach', { target: `session:${s.id}` });
+      });
+    } else {
+      winMsg('opendetach', { target: `group:${id}` });
+    }
+  };
+
+  menu.appendChild(ctxItemEl('置顶/取消置顶', togglePin, { icon: '📌' }));
+  menu.appendChild(ctxItemEl('标记未读', markUnread, { icon: '🔴' }));
+
+  if (kind === 'bot') {
+    const b = App.state.bots.find((x) => x.id === id);
+    menu.appendChild(ctxSepEl());
+    // 历史会话子菜单
+    const sessions = App.state.sessions.filter((s) => s.bot_id === id);
+    sessions.sort((a, c) => (c.updated_at || '').localeCompare(a.updated_at || ''));
+    const histItem = ctxItemEl('历史会话…', () => {
+      const sub = document.createElement('div');
+      sub.id = 'ctx-sub';
+      sub.className = 'ctx-sub';
+      const base = ctxMenuRect || { right: 2, top: 0 };
+      sub.style.left = (base.right + 2) + 'px';
+      sub.style.top = base.top + 'px';
+      for (const s of sessions) {
+        const it = document.createElement('div');
+        it.className = 'ctx-item';
+        it.innerHTML = `<span>💬</span><span>${escapeHtml(s.title)}</span>`;
+        it.onclick = async () => {
+          closeContextMenus();
+          // 设为默认 = touch 该会话（PATCH 原 title 刷新 updated_at）
+          await App.api.patch(`/api/v1/sessions/${s.id}`, { title: s.title });
+          await refreshSessions();
+          renderChatList();
+        };
+        sub.appendChild(it);
+      }
+      if (!sessions.length) {
+        const empty = document.createElement('div');
+        empty.className = 'ctx-item';
+        empty.textContent = '暂无会话（点击 Bot 项自动创建）';
+        sub.appendChild(empty);
+      }
+      document.body.appendChild(sub);
+    }, { icon: '💬' });
+    menu.appendChild(histItem);
+    menu.appendChild(ctxItemEl('编辑 Bot', () => App.run('open-bot-editor', b), { icon: '✏️' }));
+    menu.appendChild(ctxItemEl('记忆库', () => { App.state.memoryBotId = id; switchView('memory'); }, { icon: '🧠' }));
+    menu.appendChild(ctxItemEl('打开独立聊天窗口', openDetached, { icon: '🪟' }));
+    menu.appendChild(ctxSepEl());
+    menu.appendChild(ctxItemEl('删除 Bot', () => App.run('delete-bot', id), { icon: '🗑', danger: true }));
+  } else {
+    menu.appendChild(ctxSepEl());
+    menu.appendChild(ctxItemEl('群设置', () => App.run('open-group-editor', App.state.groups.find((g) => g.id === id)), { icon: '⚙' }));
+    menu.appendChild(ctxItemEl('打开独立聊天窗口', openDetached, { icon: '🪟' }));
+    menu.appendChild(ctxSepEl());
+    menu.appendChild(ctxItemEl('删除群', () => App.run('delete-group', id), { icon: '🗑', danger: true }));
+  }
+});
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.ctx-menu') && !e.target.closest('.ctx-sub')) closeContextMenus();
+});
+document.addEventListener('contextmenu', (e) => {
+  if (!e.target.closest('#session-list')) closeContextMenus();
+});
+
 /* ================= 记忆库 ================= */
 function renderMemoryBots() {
   const el = $('memory-bot-list');
@@ -1294,9 +1406,9 @@ document.addEventListener('DOMContentLoaded', () => App.run('boot'));
 
 /* WPF 桥接（T1 契约） */
 const wv = window.chrome && window.chrome.webview;
-function winMsg(action) {
+function winMsg(action, data) {
   if (!wv) return;
-  wv.postMessage({ type: 'window', payload: { action } });
+  wv.postMessage({ type: 'window', payload: { action, ...(data || {}) } });
 }
 $('titlebar').addEventListener('pointerdown', (e) => {
   if (e.button !== 0 || e.target.closest('.tb-actions')) return;
