@@ -164,6 +164,8 @@ async function consumeSse(url, body, handlers) {
 const App = {
   state: {
     config: null,
+    pinned: [],
+    reads: {},
     sessions: [],
     bots: [],
     groups: [],
@@ -223,9 +225,11 @@ const App = {
 /* ================= 视图切换 ================= */
 function switchView(view) {
   App.state.view = view;
-  $('view-messages').classList.toggle('hidden', view !== 'messages');
+  // 群聊室作为「聊天」视图内的子视图：当前群打开时以 view-groups 覆盖内容区
+  const inGroupRoom = view === 'messages' && App.state.currentGroupId !== null;
+  $('view-messages').classList.toggle('hidden', view !== 'messages' || inGroupRoom);
   $('view-bots').classList.toggle('hidden', view !== 'bots');
-  $('view-groups').classList.toggle('hidden', view !== 'groups');
+  $('view-groups').classList.toggle('hidden', view !== 'groups' && !inGroupRoom);
   $('view-memory').classList.toggle('hidden', view !== 'memory');
   $('btn-new-session').classList.toggle('hidden', view !== 'messages');
   $('btn-new-bot').classList.toggle('hidden', view !== 'bots');
@@ -237,9 +241,10 @@ function switchView(view) {
     b.classList.toggle('active', b.dataset.view === view));
   if (view === 'groups') {
     if (App.state.currentGroupId) App.run('open-group-room', App.state.currentGroupId);
-  } else {
+  } else if (!inGroupRoom) {
     App.run('close-group-room');
   }
+  if (view === 'messages') renderChatList();
   if (view === 'memory') { renderMemoryBots(); loadMemories(); }
 }
 
@@ -297,28 +302,128 @@ function setStreamingUI(streaming) {
 /* ================= 会话 ================= */
 async function refreshSessions() {
   App.state.sessions = await App.api.get('/api/v1/sessions');
-  renderSessions();
 }
 
+// 统一聊天列表由 renderChatList() 渲染；本函数保留（T7 历史会话子菜单复用），只筛选数据、不再渲染列表
 function renderSessions() {
+  const q = App.state.search.trim().toLowerCase();
+  return App.state.sessions.filter((s) => !q || s.title.toLowerCase().includes(q));
+}
+
+/* ================= 聊天列表（Bot/群合并，QQ 式） ================= */
+function isPinned(kind, id) {
+  return App.state.pinned.some((p) => p.kind === kind && p.id === id);
+}
+function readWatermark(kind, id) {
+  return App.state.reads[`${kind}:${id}`] || '';
+}
+async function defaultSessionFor(bot) {
+  const mine = App.state.sessions.filter((s) => s.bot_id === bot.id);
+  mine.sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+  if (mine.length) return mine[0];
+  const s = await App.api.post('/api/v1/sessions', { bot_id: bot.id });
+  await refreshSessions();
+  return App.state.sessions.find((x) => x.id === s.id);
+}
+async function chatListPreview(kind, id) {
+  try {
+    if (kind === 'bot') {
+      const bot = App.state.bots.find((b) => b.id === id);
+      if (!bot) return { text: '', time: '' };
+      const mine = App.state.sessions.filter((s) => s.bot_id === bot.id);
+      mine.sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+      if (!mine.length) return { text: bot.greeting || '', time: '' };
+      const msgs = await App.api.get(`/api/v1/messages?session_id=${mine[0].id}&limit=1`);
+      const last = msgs[0];
+      return { text: last ? (last.role === 'user' ? last.content : last.content) : '', time: last ? last.created_at : '' };
+    }
+    const g = await App.api.get(`/api/v1/groups/${id}`);
+    const msgs = await App.api.get(`/api/v1/groups/${id}/messages?limit=1`);
+    const last = msgs[0];
+    return { text: last ? (last.bot_id === 0 ? last.content : `${last.name || 'Bot'}：${last.content}`) : '', time: last ? last.created_at : '' };
+  } catch (_) {
+    return { text: '', time: '' };
+  }
+}
+function fmtListTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d)) return '';
+  const now = new Date();
+  if (d.toDateString() === now.toDateString())
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return `${d.getMonth() + 1}/${d.getDate()}`;
+}
+async function renderChatList() {
   const el = $('session-list');
   const q = App.state.search.trim().toLowerCase();
-  const list = App.state.sessions.filter((s) => !q || s.title.toLowerCase().includes(q));
+  const items = [];
+  for (const b of App.state.bots) {
+    const pv = await chatListPreview('bot', b.id);
+    const wm = readWatermark('bot', b.id);
+    const unread = wm && pv.time && pv.time > wm;
+    items.push({ kind: 'bot', id: b.id, name: b.name, avatar: b.avatar, avatar_url: b.avatar_url,
+                 preview: pv.text, time: pv.time, unread, bot: b });
+  }
+  for (const g of App.state.groups) {
+    const pv = await chatListPreview('group', g.id);
+    const wm = readWatermark('group', g.id);
+    const unread = wm && pv.time && pv.time > wm;
+    items.push({ kind: 'group', id: g.id, name: g.name, avatar: '👥', preview: pv.text,
+                 time: pv.time, unread, group: g });
+  }
+  const filtered = items.filter((it) => !q || it.name.toLowerCase().includes(q));
+  filtered.sort((a, b) => {
+    const pa = isPinned(a.kind, a.id) ? 1 : 0;
+    const pb = isPinned(b.kind, b.id) ? 1 : 0;
+    if (pa !== pb) return pb - pa;
+    return (b.time || '').localeCompare(a.time || '');
+  });
   el.innerHTML = '';
-  for (const s of list) {
+  for (const it of filtered) {
     const item = document.createElement('div');
-    item.className = 'list-item' + (s.id === App.state.currentSessionId ? ' active' : '');
-    item.innerHTML = `<div class="list-item-title">${escapeHtml(s.title)}</div>`;
-    item.onclick = () => App.run('select-session', s.id);
-    item.ondblclick = () => App.run('rename-session', s.id);
-    const del = document.createElement('button');
-    del.className = 'list-item-btn';
-    del.textContent = '🗑';
-    del.title = '删除会话';
-    del.onclick = (e) => { e.stopPropagation(); App.run('delete-session', s.id); };
-    item.appendChild(del);
+    item.className = 'list-item' + (it.kind === 'bot' && it.id === App.state.selectedBotId ? '' : '');
+    const av = it.kind === 'bot' ? botAvatarHtml(it.bot) : `<span class="list-item-avatar">👥</span>`;
+    item.innerHTML = `
+      <div class="list-item-avatar-wrap">${av}</div>
+      <div class="list-item-body">
+        <div class="list-item-title-row">
+          ${isPinned(it.kind, it.id) ? '<span class="pin-icon">📌</span>' : ''}
+          <span>${escapeHtml(it.name)}</span>
+        </div>
+        <div class="list-item-preview">${escapeHtml(it.preview)}</div>
+      </div>
+      <div class="list-item-side">
+        <span class="list-item-time">${fmtListTime(it.time)}</span>
+        ${it.unread ? '<span class="unread-dot"></span>' : ''}
+      </div>`;
+    item.onclick = async () => {
+      if (it.kind === 'bot') {
+        const s = await defaultSessionFor(it.bot);
+        if (s) App.run('select-session', s.id);
+        markRead('bot', it.id);
+      } else {
+        App.run('open-group-room', it.id);
+        markRead('group', it.id);
+      }
+      switchView('messages');
+    };
+    item.oncontextmenu = (e) => {
+      e.preventDefault();
+      App.run('open-context-menu', it.kind, it.id, e.clientX, e.clientY);
+    };
     el.appendChild(item);
   }
+}
+async function markRead(kind, id) {
+  App.state.reads[`${kind}:${id}`] = new Date().toISOString();
+  await saveReads();
+}
+async function saveReads() {
+  await App.api.post('/api/v1/config', { chat_reads: JSON.stringify(App.state.reads) });
+}
+async function savePinned() {
+  await App.api.post('/api/v1/config', { chat_pinned: JSON.stringify(App.state.pinned) });
 }
 
 function updateChatSub(sid) {
@@ -349,8 +454,8 @@ async function loadMessages(sid) {
 }
 
 App.registerCommand('select-session', async (id) => {
+  App.run('close-group-room');
   App.state.currentSessionId = id;
-  renderSessions();
   const s = App.state.sessions.find((x) => x.id === id);
   $('chat-title').textContent = s ? s.title : '新对话';
   updateChatSub(id);
@@ -384,6 +489,7 @@ App.registerCommand('delete-session', async (id) => {
     $('chat-empty').classList.remove('hidden');
   }
   await refreshSessions();
+  renderChatList();
 });
 
 App.registerCommand('new-session', () => {
@@ -424,6 +530,7 @@ App.registerCommand('save-new-session', async () => {
   } else {
     const s = await App.api.post('/api/v1/sessions', { bot_id: botId });
     await refreshSessions();
+    renderChatList();
     App.run('select-session', s.id);
   }
 });
@@ -643,6 +750,7 @@ App.registerCommand('save-bot', async () => {
   }
   $('modal-bot').classList.add('hidden');
   await refreshBots();
+  renderChatList();
   toast('Bot 已保存');
 });
 
@@ -656,6 +764,7 @@ App.registerCommand('delete-bot', async (id) => {
     return;
   }
   await refreshBots();
+  renderChatList();
 });
 
 /* ================= 群聊 ================= */
@@ -1033,6 +1142,7 @@ App.registerCommand('save-group', async () => {
   }
   $('modal-group').classList.add('hidden');
   await refreshGroups();
+  renderChatList();
   if (App.state.currentGroupId) App.run('open-group-room', App.state.currentGroupId);
   toast('群已保存');
 });
@@ -1043,6 +1153,7 @@ App.registerCommand('delete-group', async (id) => {
   await App.api.del(`/api/v1/groups/${id}`);
   if (App.state.currentGroupId === id) App.run('close-group-room');
   await refreshGroups();
+  renderChatList();
 });
 
 /* ================= 记忆库 ================= */
@@ -1158,9 +1269,12 @@ App.registerCommand('boot', async () => {
   try {
     App.state.config = await App.api.get('/api/v1/config');
     applyTheme(App.state.config.theme);
+    try { App.state.pinned = JSON.parse(App.state.config.chat_pinned || '[]'); } catch (_) { App.state.pinned = []; }
+    try { App.state.reads = JSON.parse(App.state.config.chat_reads || '{}'); } catch (_) { App.state.reads = {}; }
   } catch (_) {}
   try {
     await Promise.all([refreshBots(), refreshSessions(), refreshGroups()]);
+    await renderChatList();
     backendOnline(true);
   } catch (_) {
     backendOnline(false);
@@ -1214,7 +1328,7 @@ document.querySelectorAll('.tab-btn').forEach((b) =>
 
 $('search-input').addEventListener('input', (e) => {
   App.state.search = e.target.value;
-  if (App.state.view === 'messages') renderSessions();
+  if (App.state.view === 'messages') renderChatList();
   else if (App.state.view === 'bots') renderBots();
   else renderGroups();
 });

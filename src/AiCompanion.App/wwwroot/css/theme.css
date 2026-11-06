@@ -406,3 +406,12 @@ label.chk input { width: auto; }
 .mem-scope { padding: 2px 8px; border-radius: 999px; background: var(--accent-soft, rgba(99,102,241,.15));
              color: var(--accent, #818cf8); }
 .mem-actions { margin-left: auto; display: flex; gap: 6px; }
+
+/* ============ 聊天列表（QQ 式：预览 / 未读红点 / 置顶） ============ */
+.list-item-preview { font-size: 12px; color: var(--text-dim, #94a3b8); overflow: hidden;
+                     text-overflow: ellipsis; white-space: nowrap; }
+.unread-dot { width: 8px; height: 8px; border-radius: 50%; background: #ef4444; flex-shrink: 0; }
+.pin-icon { font-size: 11px; color: var(--accent, #3b82f6); flex-shrink: 0; }
+.list-item-title-row { display: flex; align-items: center; gap: 6px; }
+.list-item-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex: none; }
+.list-item-time { font-size: 11px; color: var(--text-dim); white-space: nowrap; }

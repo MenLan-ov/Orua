@@ -30,9 +30,8 @@
           <input id="search-input" type="text" placeholder="搜索会话 / Bot / 群…">
         </div>
         <nav class="side-tabs">
-          <button class="tab-btn active" data-view="messages">消息</button>
+          <button class="tab-btn active" data-view="messages">聊天</button>
           <button class="tab-btn" data-view="bots">Bot</button>
-          <button class="tab-btn" data-view="groups">群聊</button>
           <button class="tab-btn" data-view="memory">记忆</button>
         </nav>
         <div class="side-actions">
@@ -41,6 +40,7 @@
           <button id="btn-new-group" class="btn-primary full hidden">＋ 新建群</button>
         </div>
         <div class="list-area">
+          <!-- 聊天列表（session-list 容器）：Bot 与群聊合并渲染，见 app.js renderChatList -->
           <div id="session-list" class="session-list"></div>
           <div id="bot-list" class="bot-list hidden"></div>
           <div id="group-list" class="group-list hidden"></div>
