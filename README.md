@@ -18,16 +18,23 @@ Windows 桌面 AI 陪伴应用：多 Bot + 群聊围观。WPF 壳 + WebView2 前
 - **记忆库页面**：浏览 / 搜索 / 编辑 / 删除任意 Bot 的记忆，删除后立即停止注入
 - **图片头像上传**：本地上传图片（128×128 PNG ≤256KB），列表 / 详情 / 聊天气泡 / 群聊气泡 / 成员面板统一显示
 - **Bot 编辑器新字段**：最大 tokens 与 API 类型（API 类型预留「OpenAI 兼容」）
+- **QQ 式聊天列表**：侧栏「消息」页签改名「聊天」，单聊与群聊合并为同一列表（置顶区 + 按最近活跃排序）；每个 Bot 一个聊天项，点击进入其最近会话（无会话自动创建），未读红点与置顶重启保留
+- **QQ 式右键菜单**：按项类型（Bot / 群）适配——置顶 / 标记未读 / 历史会话子菜单（设为默认 · 重命名 · 清空 · 导出 · 删除）/ 编辑 Bot / 记忆库 / 群设置 / 打开独立聊天窗口 / 从列表移除（删除二次确认，默认 Bot 禁删 → 1001）
+- **独立聊天窗口**：任一会话或群聊可在独立窗口中与主窗口并行打开（同一前端 detached 模式），发送与同步照常；同一目标重复打开聚焦已有窗口，主窗口关闭时联动关闭
+- **Bot 技能系统**：6 个内置技能（计算器 / 时间日期 / 系统信息 / HTTP 请求 / 读取文件 / 定时提醒），Bot 启用后经 Function calling 在单聊中「调用 → 执行 → 回填 → 续聊」（最多 3 轮）；技能失败回填错误文本、不中断对话；群聊首版不启用
+- **插件页**：侧栏新增「插件」页签，左侧技能库 6 卡片、右侧按 Bot 的技能开关，与 Bot 编辑器的技能多选同一数据
 
 ## 架构
 
 ```
 WPF (net8.0-windows, WebView2, app.local)
-  └─ wwwroot/ (index.html + js/app.js + css/theme.css, 虚拟主机)
-      └─ HTTP → C++ 后端 (127.0.0.1:8765, 回退 8766-8775)
-          ├─ SQLite (data/app.db, WAL) — 会话/Bot/群/消息/记忆/设置
-          ├─ 群聊引擎 (每群一个线程的状态机, SSE 广播)
-          └─ WinHTTP → OpenAI 兼容 API
+  ├─ wwwroot/ (index.html + js/app.js + css/theme.css, 虚拟主机) — 聊天 / Bot / 记忆 / 插件
+  ├─ ChatWindow (独立聊天窗口，同一前端 detached 模式 + 独立 WebView2 用户数据目录)
+  └─ HTTP → C++ 后端 (127.0.0.1:8765, 回退 8766-8775)
+      ├─ SQLite (data/app.db, WAL) — 会话/Bot/群/消息/记忆/技能/提醒/设置
+      ├─ 群聊引擎 (每群一个线程的状态机, SSE 广播)
+      ├─ 技能执行器 (6 个内置技能注册表, 单聊工具循环 ≤3 轮)
+      └─ WinHTTP → OpenAI 兼容 API
 ```
 
 ## 运行开发版
@@ -64,7 +71,7 @@ bin\backend\backend.exe --data data_e2e
 powershell -ExecutionPolicy Bypass -File scripts\test_api.ps1
 ```
 
-输出 `CRUD API TESTS PASSED` 即通过（覆盖 bots/groups CRUD、群 SSE ≥2 轮、插话、会话 bot 绑定、单聊流/重新生成/导出/清空、私聊/群聊记忆提取、记忆 CRUD/搜索、头像上传、memory_extraction 配置等）。测试用独立数据目录 `data_e2e`，不影响 `data/` 用户数据。
+输出 `CRUD API TESTS PASSED` 即通过（覆盖 bots/groups CRUD、群 SSE ≥2 轮、插话、会话 bot 绑定、单聊流/重新生成/导出/清空、私聊/群聊记忆提取、记忆 CRUD/搜索、头像上传、memory_extraction 配置、skills/bot_skills 回环、技能全链路（tool_call → 执行 → 回填 → 「计算结果：2」）、reminders 到期查询与完成、chat_pinned/chat_reads 配置等）。测试用独立数据目录 `data_e2e`，不影响 `data/` 用户数据。
 
 ## 数据存储
 
@@ -76,8 +83,10 @@ powershell -ExecutionPolicy Bypass -File scripts\test_api.ps1
 | sessions | 会话（bot_id 绑定 Bot，0 = 默认） |
 | messages | 单聊消息 |
 | groups / group_members / group_messages | 群 / 成员（position 即发言顺序）/ 群消息（bot_id 为 NULL = 用户插话） |
-| settings | 全局默认 API 配置、主题、代理、default_bot_id、memory_extraction（记忆提取开关） |
+| settings | 全局默认 API 配置、主题、代理、default_bot_id、memory_extraction（记忆提取开关）、chat_pinned（聊天置顶列表）、chat_reads（未读水位） |
 | bot_memories | Bot 记忆（bot_id / scope=private/group / group_id / content / tags / source_msg_id） |
+| bot_skills | Bot 技能开关（bot_id / skill_id / enabled / params，UNIQUE(bot_id, skill_id)，随 Bot 级联删除） |
+| reminders | 定时提醒（bot_id / content / due_at ISO 8601 / done，`reminder` 技能写入，随 Bot 级联删除） |
 
 ## API 摘要（统一前缀 /api/v1，信封 {code, data|message}）
 
@@ -91,6 +100,8 @@ powershell -ExecutionPolicy Bypass -File scripts\test_api.ps1
 | DELETE | /bots/{id}/memories/{memId} | 删除记忆 |
 | POST | /bots/{id}/avatar | 上传头像 {image_base64}（PNG ≤256KB） |
 | GET | /bots/{id}/avatar | 头像图片 |
+| GET | /skills | 内置技能库（6 个：id / name / description / params_schema） |
+| GET/PUT | /bots/{id}/skills | 该 Bot 技能开关 / 全量覆盖 {skills:[{skill_id, enabled}]}（未知 skill_id 或 skills 非数组 → 400，Bot 不存在 → 404） |
 | GET/POST | /groups | 群列表 / 创建 {name, bot_ids[2-10], topic?} |
 | GET/PATCH/DELETE | /groups/{id} | 详情（含 members）/ 编辑（运行中改成员 → 409 + code 1002）/ 删除（运行中先停止） |
 | GET | /groups/{id}/messages?limit=200 | 群消息（倒序） |
@@ -103,13 +114,26 @@ powershell -ExecutionPolicy Bypass -File scripts\test_api.ps1
 | POST | /chat/regenerate | 重新生成最后一条回复 |
 | POST | /chat/stop | 中止进行中的生成 |
 | POST | /export?session_id=&format=md\|json\|txt | 会话导出 |
-| GET/POST | /config | 全局默认 API 配置 / 主题 / 代理 / 记忆提取开关 |
+| GET | /reminders?due=1 | 提醒列表（due=1 只返回到期未完成；缺省全部） |
+| POST | /reminders/{id}/done | 标记提醒完成（不存在 → 404） |
+| GET/POST | /config | 全局默认 API 配置 / 主题 / 代理 / 记忆提取开关 / chat_pinned、chat_reads（JSON 字符串直通） |
 
 错误码：1001=默认 Bot 不可删除，1002=群状态冲突，1003=成员数越界（2-10），1004=含停用 Bot。
 
 ## 插件
 
-`backend/src/event_bus.h` 定义事件总线，内置 Webhook 插件可将事件 POST 到外部地址。事件：`chat.completed` / `chat.error` / `session.created` / `session.deleted`。
+侧栏「插件」页签管理 6 个内置技能（左侧技能库、右侧按 Bot 的开关，与 Bot 编辑器技能多选同一数据）；Bot 启用后在单聊中经 Function calling 调用，执行器与安全约束见 `backend/src/skills.h/.cpp`：
+
+| 技能 | 说明 | 实现与安全约束 |
+|---|---|---|
+| calculator | 四则运算表达式 | 自制解析器，仅支持 `+ - * / ( )`、数字与空格；非法输入返回错误文本，**无 eval** |
+| datetime | 时间日期 | 当前时间 / 日期 / 星期，取本地系统时间，零依赖 |
+| sysinfo | 系统信息 | 内存与磁盘占用（GlobalMemoryStatusEx / GetDiskFreeSpaceExW，只读） |
+| http_get | HTTP 请求 | WinHTTP GET，正文 ≤2KB 截断、10s 超时；**拒绝 localhost / 127.* / 内网段（10. / 172.16-31. / 192.168.）防 SSRF** |
+| file_read | 读取文件 | 读取指定本地文本文件，≤8KB 截断，失败返回错误文本 |
+| reminder | 定时提醒 | 解析相对分钟或绝对时间，写入 `reminders` 表（到期提示见验收清单备注） |
+
+另：`backend/src/event_bus.h` 定义事件总线，内置 Webhook 插件可将事件 POST 到外部地址。事件：`chat.completed` / `chat.error` / `session.created` / `session.deleted`。
 
 ## 打包
 
@@ -143,3 +167,17 @@ dotnet publish src\AiCompanion.App -c Release -r win-x64
 9. `memory_extraction` 关闭后不再新增记忆，已有记忆仍注入
 10. 记忆提取/检索失败时聊天与群聊功能正常（静默降级）
 11. v2 全部功能与自动化测试保持全绿；老库迁移零破坏
+
+### v4
+
+1. 侧栏页签为「聊天 / Bot / 记忆 / 插件」；聊天页单聊与群聊同一列表，QQ 好友式布局（置顶区 + 按最近活跃排序）
+2. 每个 Bot 一个聊天项，点击进入其最近会话（无会话时自动创建）；同一 Bot 的多会话入口在右键菜单
+3. 右键菜单按项类型（Bot / 群）显示正确项集；删除有二次确认；默认 Bot 删除返回 1001 提示
+4. 置顶与未读红点生效，重启后保留（`chat_pinned` / `chat_reads`）
+5. 独立聊天窗口：打开 / 发送 / 同步 / 主窗口关闭联动可用；同一目标重复打开聚焦已有窗口
+6. 插件页展示 6 个技能卡片；Bot 技能开关与 Bot 编辑器勾选同步生效
+7. 单聊中 Bot 调用技能并给出正确结果（真实 API 或 `LLM_MOCK=1` 均可验证，计算器返回「计算结果：2」）
+8. 提醒到期前端弹出提示；HTTP 技能拒绝内网地址；文件技能超过 8KB 截断
+9. v1 / v2 / v3 功能与自动化测试全绿；旧库升级零破坏
+
+> 第 8 项备注：`reminder` 技能入库、`/api/v1/reminders?due=1` 到期查询与完成标记已由自动化覆盖（ctest + test_api.ps1）；前端尚未轮询提醒到期并弹提示，实机验收以「HTTP 拒绝内网」「文件 8KB 截断」两项为准。
