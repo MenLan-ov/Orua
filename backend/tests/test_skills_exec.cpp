@@ -90,6 +90,35 @@ TEST_CASE("skills_exec: file_read 截断与错误") {
   CHECK(r3.contains("error"));
 }
 
+TEST_CASE("skills_exec: 非法 UTF-8 结果按替换策略序列化（回填不中断对话）") {
+  // 构造含非法 UTF-8 字节的临时文件：file_read 裸 append 字节 + 8192 硬切，必然产出非法序列
+  auto p = std::filesystem::temp_directory_path() / "ac_v4_skill_badutf.bin";
+  {
+    std::ofstream ofs(p, std::ios::binary);
+    ofs.put('\xFF'); ofs.put('\xFE'); ofs.put('\x00'); ofs.put('\x41');
+    ofs.put('\xE4'); ofs.put('\xBD'); ofs.put('\xA0');   // 合法的「你」
+    ofs.put('\xE0'); ofs.put('\xA0');                    // 被截断的三字节序列
+  }
+  json r;
+  REQUIRE_NOTHROW(r = sk::execute("file_read", {{"path", p.string()}}));
+  REQUIRE(r.contains("content"));
+  CHECK_FALSE(r["content"].get<std::string>().empty());
+
+  // 严格模式确实抛 type_error.316 —— 证明下面那条替换策略断言有鉴别力，不是空断言
+  CHECK_THROWS_AS(r.dump(), json::type_error);
+
+  // server.cpp 工具回填用的序列化方式：不抛、非空、可被再次解析回 JSON 对象
+  std::string payload;
+  REQUIRE_NOTHROW(payload = r.dump(-1, ' ', false, json::error_handler_t::replace));
+  CHECK(payload.size() > 2);
+  json back;
+  REQUIRE_NOTHROW(back = json::parse(payload));
+  CHECK(back.contains("content"));
+  CHECK(back["content"].is_string());
+
+  std::filesystem::remove(p);
+}
+
 TEST_CASE("skills_exec: reminder 写入数据库") {
   auto path = tmpDb("ac_v4_skill_reminder.db");
   REQUIRE(db::open(path.string()));

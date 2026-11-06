@@ -301,6 +301,17 @@ bool validateBotIds(const json& arr, std::vector<int64_t>& out,
 std::mutex g_stopMtx;
 std::map<int64_t, std::shared_ptr<std::atomic_bool>> g_stopFlags;
 
+// 会话 stop 标记的作用域守卫：流式回调体退出（正常/异常）时清理，
+// 避免陈旧 flag 影响后续同会话请求（旧写法只覆盖正常路径）
+struct StopFlagGuard {
+  int64_t sessionId;
+  explicit StopFlagGuard(int64_t sid) : sessionId(sid) {}
+  ~StopFlagGuard() {
+    std::lock_guard<std::mutex> lk(g_stopMtx);
+    g_stopFlags.erase(sessionId);
+  }
+};
+
 int64_t parseSessionId(const httplib::Request& req, httplib::Response& res) {
   json b = parseBody(req, res);
   if (res.status == 400) return 0;
@@ -393,6 +404,7 @@ void runChat(int64_t sessionId, const std::string& content, bool appendUser,
       "text/event-stream",
       [req, sessionId, botId, userText, stop, full, hadError, errCode, errMsg](size_t,
                                                              httplib::DataSink& sink) {
+        StopFlagGuard stopGuard(sessionId);
         try {
           llm::OpenAiCompatProvider provider;
           llm::ChatRequest cur = req;
@@ -442,14 +454,18 @@ void runChat(int64_t sessionId, const std::string& content, bool appendUser,
                 if (parsed.is_object()) params = parsed;
               } catch (...) {
               }
-              json result = sk::execute(name, params);
-              cur.messages.push_back(
-                  {"tool", result.dump(), json{{"tool_call_id", callId}}});
+              std::string payload;
+              try {
+                json result = sk::execute(name, params);
+                payload = result.dump(-1, ' ', false, json::error_handler_t::replace);
+              } catch (const std::exception& e) {
+                // 技能执行失败不中断对话：回填错误文本后继续，保证每个 tool_call
+                // 都有对应 tool 消息（否则下一轮请求会被上游 API 拒绝）
+                payload = json{{"error", std::string("技能执行失败: ") + e.what()}}
+                              .dump(-1, ' ', false, json::error_handler_t::replace);
+              }
+              cur.messages.push_back({"tool", payload, json{{"tool_call_id", callId}}});
             }
-          }
-          {
-            std::lock_guard<std::mutex> lk(g_stopMtx);
-            g_stopFlags.erase(sessionId);
           }
           if (!*hadError && !full->empty()) {
             int64_t aid = db::appendMessage(sessionId, "assistant", *full).id;
