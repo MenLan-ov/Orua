@@ -896,10 +896,9 @@ function addGroupNote(text) {
 
 // 群状态变更的唯一入口：面板态、列表数据源、列表渲染必须同时更新，
 // 否则聊天列表的「进行中」徽标只能等下一次整表刷新才碰巧出现。
-// gid 传 null 表示只复位面板（离开群房间时的本地视图态），不写回 groups 列表状态。
 function syncGroupStatus(gid, state) {
   App.state.groupStatus = state;
-  const g = gid === null ? null : App.state.groups.find((x) => x.id === gid);
+  const g = App.state.groups.find((x) => x.id === gid);
   if (g) g.status = state;
   renderChatList();
 }
@@ -1581,9 +1580,18 @@ App.registerCommand('save-settings', async () => {
 });
 
 /* ================= 启动 ================= */
+let backendWasUp = null;
+// 先取回服务端真值再重渲染：两者并发时 renderChatList 会快照到陈旧数组，把旧徽标又写回去
+async function resyncGroups() {
+  try { await refreshGroups(); } catch (_) {}
+  renderChatList();
+}
 function backendOnline(online) {
   $('status-dot').className = 'status-dot ' + (online ? 'ok' : 'err');
   $('status-text').textContent = online ? '后端已连接' : '后端未连接';
+  // 后端重启会把所有群复位 idle（db.cpp:311），页面未重载时列表还挂着旧的「进行中」徽标
+  if (online && backendWasUp === false && !App.state.detached) resyncGroups();
+  backendWasUp = online;
 }
 
 App.registerCommand('backend-status', (p) => {
