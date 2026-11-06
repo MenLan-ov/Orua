@@ -123,6 +123,39 @@ TEST_CASE("memories: 删除群级联清群记忆") {
   std::filesystem::remove(path);
 }
 
+TEST_CASE("memories: private 记忆库内 group_id/source_msg_id 为 SQL NULL") {
+  auto path = tmpDb("ac_v3_mem_null.db");
+  REQUIRE(db::open(path.string()));
+  auto b = db::createBot(db::Bot{0, "测试", "🤖", "", "人设"});
+  auto m1 = db::addMemory(b.id, "private", 0, "私密记忆", "[]", 0);
+  auto m2 = db::addMemory(b.id, "group", 7, "群记忆", "[]", 42);
+  db::close();
+
+  // 绕过 db 层，用原生 sqlite3 检查 raw 存储（规格 §3.2：private 记 NULL，group 记真实群号）
+  sqlite3* raw = nullptr;
+  REQUIRE(sqlite3_open(path.string().c_str(), &raw) == SQLITE_OK);
+  sqlite3_stmt* st = nullptr;
+  REQUIRE(sqlite3_prepare_v2(raw,
+      "SELECT group_id IS NULL, source_msg_id IS NULL FROM bot_memories WHERE id=?",
+      -1, &st, nullptr) == SQLITE_OK);
+  sqlite3_bind_int64(st, 1, m1.id);
+  REQUIRE(sqlite3_step(st) == SQLITE_ROW);
+  CHECK(sqlite3_column_int(st, 0) == 1);
+  CHECK(sqlite3_column_int(st, 1) == 1);
+  sqlite3_finalize(st);
+  st = nullptr;
+  REQUIRE(sqlite3_prepare_v2(raw,
+      "SELECT group_id, source_msg_id FROM bot_memories WHERE id=?", -1, &st, nullptr)
+      == SQLITE_OK);
+  sqlite3_bind_int64(st, 1, m2.id);
+  REQUIRE(sqlite3_step(st) == SQLITE_ROW);
+  CHECK(sqlite3_column_int64(st, 0) == 7);
+  CHECK(sqlite3_column_int64(st, 1) == 42);
+  sqlite3_finalize(st);
+  sqlite3_close(raw);
+  std::filesystem::remove(path);
+}
+
 TEST_CASE("memories: bots 新列与 v2 老库迁移") {
   auto path = tmpDb("ac_v3_mem_migrate.db");
   createV2ShapeDb(path);

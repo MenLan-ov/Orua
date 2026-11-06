@@ -616,10 +616,26 @@ Memory addMemory(int64_t botId, const std::string& scope, int64_t groupId,
                  int64_t sourceMsgId) {
   std::lock_guard<std::recursive_mutex> lock(g_mtx);
   std::string ts = nowIso();
-  execute("INSERT INTO bot_memories(bot_id,scope,group_id,content,tags,source_msg_id,"
-          "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-          {std::to_string(botId), scope, groupId == 0 ? "" : std::to_string(groupId),
-           content, tags, sourceMsgId == 0 ? "" : std::to_string(sourceMsgId), ts, ts});
+  sqlite3_stmt* st = nullptr;
+  if (sqlite3_prepare_v2(g_db,
+      "INSERT INTO bot_memories(bot_id,scope,group_id,content,tags,source_msg_id,"
+      "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", -1, &st, nullptr) != SQLITE_OK)
+    throw std::runtime_error("prepare failed: " + std::string(sqlite3_errmsg(g_db)));
+  sqlite3_bind_int64(st, 1, botId);
+  sqlite3_bind_text(st, 2, scope.c_str(), -1, SQLITE_TRANSIENT);
+  // 规格 §3.2：private 记忆 group_id=0 → 库内绑定 SQL NULL；source_msg_id 同理
+  if (groupId == 0) sqlite3_bind_null(st, 3);
+  else sqlite3_bind_int64(st, 3, groupId);
+  sqlite3_bind_text(st, 4, content.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(st, 5, tags.c_str(), -1, SQLITE_TRANSIENT);
+  if (sourceMsgId == 0) sqlite3_bind_null(st, 6);
+  else sqlite3_bind_int64(st, 6, sourceMsgId);
+  sqlite3_bind_text(st, 7, ts.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(st, 8, ts.c_str(), -1, SQLITE_TRANSIENT);
+  int rc = sqlite3_step(st);
+  sqlite3_finalize(st);
+  if (rc != SQLITE_DONE)
+    throw std::runtime_error("step failed: " + std::string(sqlite3_errmsg(g_db)));
   Memory m;
   m.id = sqlite3_last_insert_rowid(g_db);
   m.bot_id = botId; m.scope = scope; m.group_id = groupId;
