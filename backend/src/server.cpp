@@ -845,7 +845,7 @@ void registerGroupRoutes(httplib::Server& svr) {
   });
 }
 
-/* ---------- 技能路由（v4） ---------- */
+/* ---------- 技能与提醒路由（v4） ---------- */
 
 void registerSkillRoutes(httplib::Server& svr) {
   svr.Get("/api/v1/skills", [](const httplib::Request&, httplib::Response& res) {
@@ -896,6 +896,27 @@ void registerSkillRoutes(httplib::Server& svr) {
       skills.push_back({sid, on});
     }
     db::setBotSkills(id, skills);
+    res.set_content(okJson(json::object()).dump(), "application/json; charset=utf-8");
+  });
+
+  svr.Get("/api/v1/reminders", [](const httplib::Request& req, httplib::Response& res) {
+    bool dueOnly = req.get_param_value("due") == "1";
+    json arr = json::array();
+    for (auto& r : db::listReminders(dueOnly))
+      arr.push_back({{"id", r.id},
+                     {"bot_id", r.bot_id},
+                     {"content", r.content},
+                     {"due_at", r.due_at},
+                     {"done", r.done}});
+    res.set_content(okJson(json{{"reminders", arr}}).dump(), "application/json; charset=utf-8");
+  });
+
+  svr.Post(R"(/api/v1/reminders/(\d+)/done)", [](const httplib::Request& req, httplib::Response& res) {
+    int64_t id = std::stoll(req.matches[1].str());
+    if (!db::markReminderDone(id)) {
+      fail(res, 404, 404, "提醒不存在");
+      return;
+    }
     res.set_content(okJson(json::object()).dump(), "application/json; charset=utf-8");
   });
 }
@@ -1031,7 +1052,9 @@ void registerConfigRoutes(httplib::Server& svr) {
                  {"proxy_enabled", db::getSetting("proxy_enabled").value_or("0")},
                  {"proxy_host", db::getSetting("proxy_host").value_or("")},
                  {"proxy_port", db::getSetting("proxy_port").value_or("0")},
-                 {"memory_extraction", db::getSetting("memory_extraction").value_or("1")}};
+                 {"memory_extraction", db::getSetting("memory_extraction").value_or("1")},
+                 {"chat_pinned", db::getSetting("chat_pinned").value_or("[]")},
+                 {"chat_reads", db::getSetting("chat_reads").value_or("{}")}};
     res.set_content(okJson(data).dump(), "application/json; charset=utf-8");
   });
 
@@ -1052,6 +1075,8 @@ void registerConfigRoutes(httplib::Server& svr) {
     if (b.contains("memory_extraction"))
       db::setSetting("memory_extraction",
                      b["memory_extraction"].get<std::string>() == "1" ? "1" : "0");
+    if (b.contains("chat_pinned")) db::setSetting("chat_pinned", b["chat_pinned"].get<std::string>());
+    if (b.contains("chat_reads")) db::setSetting("chat_reads", b["chat_reads"].get<std::string>());
     res.set_content(okJson(json::object()).dump(), "application/json; charset=utf-8");
   });
 }

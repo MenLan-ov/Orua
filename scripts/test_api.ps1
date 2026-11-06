@@ -136,6 +136,18 @@ Invoke-RestMethod "$base/api/v1/groups/$gid" -Method Delete | Out-Null
 $gl = Invoke-RestMethod "$base/api/v1/groups"
 Assert-True (($gl.data | Where-Object id -eq $gid) -eq $null) 'group delete'
 
+# ---- v4: reminders + config 置顶未读键 ----
+$rem = Invoke-RestMethod "$base/api/v1/reminders?due=1"
+Assert-True ($rem.code -eq 0) 'reminders list code'
+Assert-True ($rem.data.reminders.Count -eq 0) 'reminders empty'
+$rd404 = Invoke-ExpectError 'Post' "$base/api/v1/reminders/999999999/done" @{}
+Assert-True ($rd404.Status -eq 404) 'reminder done 404'
+Invoke-Json 'Post' "$base/api/v1/config" @{ chat_pinned = '[{"kind":"bot","id":1}]'; chat_reads = '{"bot:1":"2026-01-01T00:00:00Z"}' } | Out-Null
+$cfg4 = Invoke-RestMethod "$base/api/v1/config"
+Assert-True ($cfg4.data.chat_pinned -match '"kind":"bot"') 'config chat_pinned roundtrip'
+Assert-True ($cfg4.data.chat_reads -match 'bot:1') 'config chat_reads roundtrip'
+Invoke-Json 'Post' "$base/api/v1/config" @{ chat_pinned = '[]'; chat_reads = '{}' } | Out-Null
+
 # ---- v3: 记忆与头像 ----
 $memEmpty = Invoke-RestMethod "$base/api/v1/bots/$botId/memories?scope=private"
 Assert-True ($memEmpty.code -eq 0) 'memories list code'
