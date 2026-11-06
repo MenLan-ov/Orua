@@ -19,6 +19,7 @@ add_executable(backend
   src/chat_service.cpp
   src/event_bus.cpp
   src/group_engine.cpp
+  src/memory_service.cpp
   src/server.cpp
 )
 target_include_directories(backend PRIVATE src third_party)
@@ -39,6 +40,7 @@ add_executable(backend_tests
   tests/test_chat_service.cpp
   tests/test_event_bus.cpp
   tests/test_group_engine.cpp
+  tests/test_memory_service.cpp
   src/db.cpp
   src/config.cpp
   src/dpapi_util.cpp
@@ -46,6 +48,7 @@ add_executable(backend_tests
   src/chat_service.cpp
   src/event_bus.cpp
   src/group_engine.cpp
+  src/memory_service.cpp
   src/logger.cpp
 )
 target_include_directories(backend_tests PRIVATE src third_party)
