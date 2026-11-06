@@ -894,12 +894,22 @@ function addGroupNote(text) {
   scrollGroupToBottom();
 }
 
+// 群状态变更的唯一入口：面板态、列表数据源、列表渲染必须同时更新，
+// 否则聊天列表的「进行中」徽标只能等下一次整表刷新才碰巧出现。
+// gid 传 null 表示只复位面板（离开群房间时的本地视图态），不写回 groups 列表状态。
+function syncGroupStatus(gid, state) {
+  App.state.groupStatus = state;
+  const g = gid === null ? null : App.state.groups.find((x) => x.id === gid);
+  if (g) g.status = state;
+  renderChatList();
+}
+
 App.registerCommand('open-group-room', async (gid) => {
   closeGroupStream();
   App.state.typers.clear();
   App.state.gmsgSeen.clear();
   App.state.currentGroupId = gid;
-  App.state.groupStatus = 'idle';
+  App.state.groupStatus = 'idle';  // 进房前的本地视图复位，不是服务端状态，故不写回 groups 列表
   App.state.groupTurn = 0;
   App.state.groupBackoff = 1000;
   let g;
@@ -916,7 +926,7 @@ App.registerCommand('open-group-room', async (gid) => {
   $('group-title').textContent = g.name;
   $('group-sub').textContent = g.topic ? `话题：${g.topic}` : '';
   $('group-topic').value = '';
-  App.state.groupStatus = g.status;
+  syncGroupStatus(gid, g.status);
   App.state.groupTurn = 0;
   updateGroupControls();
   await reconcileGroupMessages();
@@ -991,7 +1001,7 @@ function finishTyper(botId) {
 function handleGroupEvent(ev, obj) {
   if (ev === 'status') {
     const prev = App.state.groupStatus;
-    App.state.groupStatus = obj.state;
+    syncGroupStatus(App.state.currentGroupId, obj.state);
     App.state.groupTurn = obj.turn || App.state.groupTurn;
     updateGroupControls();
     if (obj.state === 'idle' && prev !== 'idle') addGroupNote('群聊已停止');
@@ -1073,7 +1083,7 @@ App.registerCommand('group-start', async () => {
   const topic = $('group-topic').value.trim();
   try {
     const r = await App.api.post(`/api/v1/groups/${gid}/start`, topic ? { topic } : {});
-    App.state.groupStatus = r.state;
+    syncGroupStatus(gid, r.state);
     updateGroupControls();
     if (topic) {
       App.state.currentGroup.topic = topic;
@@ -1088,7 +1098,7 @@ App.registerCommand('group-pause', async () => {
   if (!gid) return;
   try {
     const r = await App.api.post(`/api/v1/groups/${gid}/pause`, {});
-    App.state.groupStatus = r.state;
+    syncGroupStatus(gid, r.state);
     updateGroupControls();
   } catch (e) { toast(e.message); }
 });
@@ -1098,7 +1108,7 @@ App.registerCommand('group-resume', async () => {
   if (!gid) return;
   try {
     const r = await App.api.post(`/api/v1/groups/${gid}/resume`, {});
-    App.state.groupStatus = r.state;
+    syncGroupStatus(gid, r.state);
     updateGroupControls();
   } catch (e) { toast(e.message); }
 });
@@ -1108,7 +1118,7 @@ App.registerCommand('group-stop', async () => {
   if (!gid) return;
   try {
     const r = await App.api.post(`/api/v1/groups/${gid}/stop`, {});
-    App.state.groupStatus = r.state;
+    syncGroupStatus(gid, r.state);
     updateGroupControls();
   } catch (e) { toast(e.message); }
 });
