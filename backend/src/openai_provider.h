@@ -27,4 +27,7 @@ class OpenAiCompatProvider : public ILlmProvider {
                   const std::atomic_bool& stop) override;
 };
 
+// 测试可见性：离线断言请求体（tools/extra 透传）
+std::string buildBodyForTest(const ChatRequest& req);
+
 }  // namespace llm

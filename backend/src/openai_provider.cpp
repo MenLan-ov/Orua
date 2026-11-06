@@ -95,29 +95,37 @@ std::string resolveProxy(const ChatRequest& req) {
 
 std::string buildBody(const ChatRequest& req) {
   json body = {{"model", req.model}, {"stream", true}, {"messages", json::array()}};
-  for (auto& m : req.messages)
-    body["messages"].push_back({{"role", m.role}, {"content", m.content}});
+  for (auto& m : req.messages) {
+    json j = {{"role", m.role}, {"content", m.content}};
+    if (!m.extra.empty())
+      for (auto& [k, v] : m.extra.items()) j[k] = v;
+    body["messages"].push_back(j);
+  }
   if (req.temperature > 0) body["temperature"] = req.temperature;
   if (req.max_tokens > 0) body["max_tokens"] = req.max_tokens;
+  if (!req.tools.empty()) body["tools"] = req.tools;
   return body.dump();
 }
 
-void emitDelta(StreamCallback cb, const json& j) {
-  if (!j.contains("choices") || !j["choices"].is_array() || j["choices"].empty())
+void mockStream(StreamCallback cb, const std::atomic_bool& stop,
+                const ChatRequest& req) {
+  bool hasTool = false;
+  for (auto& m : req.messages)
+    if (m.role == "tool") hasTool = true;
+  if (!req.tools.empty() && !hasTool) {
+    json tc = json::array(
+        {{{"id", "call_mock_1"},
+          {"type", "function"},
+          {"function", {{"name", "calculator"}, {"arguments", "{\"expression\":\"1+1\"}"}}}}});
+    cb({"tool_calls", "", 0, "", tc.dump()});
     return;
-  auto& ch = j["choices"][0];
-  if (!ch.contains("delta") || !ch["delta"].is_object()) return;
-  auto& d = ch["delta"];
-  if (d.contains("content") && d["content"].is_string()) {
-    std::string t = d["content"].get<std::string>();
-    if (!t.empty()) cb({"delta", t, 0, ""});
   }
-}
-
-void mockStream(StreamCallback cb, const std::atomic_bool& stop) {
-  const std::vector<std::string> pieces = {
-      "你好呀！", "我是内置 Mock 回复，", "当前 LLM_MOCK=1，", "用于前端联调。",
-      "\n\n支持 **Markdown** 渲染哦：\n\n```js\nconsole.log('hello');\n```"};
+  std::vector<std::string> pieces =
+      hasTool
+          ? std::vector<std::string>{"计算结果：2"}
+          : std::vector<std::string>{
+                "你好呀！", "我是内置 Mock 回复，", "当前 LLM_MOCK=1，", "用于前端联调。",
+                "\n\n支持 **Markdown** 渲染哦：\n\n```js\nconsole.log('hello');\n```"};
   for (auto& p : pieces) {
     if (stop) return;
     cb({"delta", p, 0, ""});
@@ -126,6 +134,28 @@ void mockStream(StreamCallback cb, const std::atomic_bool& stop) {
 }
 
 }  // namespace
+
+void ToolCallAccumulator::feed(const json& delta) {
+  if (!delta.contains("tool_calls") || !delta["tool_calls"].is_array()) return;
+  for (auto& tc : delta["tool_calls"]) {
+    int idx = tc.value("index", 0);
+    while (static_cast<int>(out_.size()) <= idx) out_.push_back(json::object());
+    auto& slot = out_[idx];
+    if (tc.contains("id") && tc["id"].is_string()) slot["id"] = tc["id"];
+    if (tc.value("type", "") == "function") slot["type"] = "function";
+    if (tc.contains("function") && tc["function"].is_object()) {
+      auto& fn = tc["function"];
+      if (fn.contains("name") && fn["name"].is_string() && !fn["name"].get<std::string>().empty())
+        slot["function"]["name"] = fn["name"];
+      if (fn.contains("arguments") && fn["arguments"].is_string()) {
+        std::string prev = slot["function"].value("arguments", "");
+        slot["function"]["arguments"] = prev + fn["arguments"].get<std::string>();
+      }
+    }
+  }
+}
+
+json ToolCallAccumulator::finish() { return out_; }
 
 void SseParser::feed(const std::string& chunk) {
   buf_ += chunk;
@@ -161,7 +191,7 @@ void SseParser::finish() {
 void OpenAiCompatProvider::streamChat(const ChatRequest& req, StreamCallback cb,
                                       const std::atomic_bool& stop) {
   if (std::getenv("LLM_MOCK")) {
-    mockStream(cb, stop);
+    mockStream(cb, stop, req);
     return;
   }
   if (req.base_url.empty() || req.api_key.empty() || req.model.empty()) {
@@ -272,10 +302,21 @@ void OpenAiCompatProvider::streamChat(const ChatRequest& req, StreamCallback cb,
   }
 
   SseParser parser;
+  ToolCallAccumulator acc;
   parser.onEvent = [&](const std::string& /*ev*/, const std::string& data) {
     if (data == "[DONE]") return;
     try {
-      emitDelta(cb, json::parse(data));
+      json j = json::parse(data);
+      if (!j.contains("choices") || !j["choices"].is_array() || j["choices"].empty())
+        return;
+      auto& d = j["choices"][0]["delta"];
+      if (!d.is_object()) return;
+      bool hadTool = d.contains("tool_calls") && d["tool_calls"].is_array();
+      if (hadTool) acc.feed(d);
+      if (d.contains("content") && d["content"].is_string()) {
+        std::string t = d["content"].get<std::string>();
+        if (!t.empty()) cb({"delta", t, 0, ""});
+      }
     } catch (...) {
       // 忽略无法解析的事件（如 usage 统计、非标准扩展）
     }
@@ -295,11 +336,15 @@ void OpenAiCompatProvider::streamChat(const ChatRequest& req, StreamCallback cb,
     parser.feed(std::string(buf, read));
   }
   parser.finish();
+  json tcs = acc.finish();
+  if (!tcs.empty()) cb({"tool_calls", "", 0, "", tcs.dump()});
 
   WinHttpCloseHandle(hReq);
   WinHttpCloseHandle(hConn);
   WinHttpCloseHandle(hSession);
   logx::info("upstream stream ended");
 }
+
+std::string buildBodyForTest(const ChatRequest& req) { return buildBody(req); }
 
 }  // namespace llm

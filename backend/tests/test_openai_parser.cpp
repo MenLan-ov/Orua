@@ -57,3 +57,41 @@ TEST_CASE("sse: \\r\\n 行尾与 event 字段混排") {
   CHECK(got[0].first == "delta");
   CHECK(got[0].second == "{\"x\":\"y\"}");
 }
+
+TEST_CASE("openai: ToolCallAccumulator 跨分片聚合") {
+  llm::ToolCallAccumulator acc;
+  acc.feed(json::parse(R"({"tool_calls":[{"index":0,"id":"call_1","type":"function",
+      "function":{"name":"calculator","arguments":"{\"expr"}}]})"));
+  acc.feed(json::parse(R"({"tool_calls":[{"index":0,"function":{"arguments":"ession\":\"1+1\"}"}}]})"));
+  acc.feed(json::parse(R"({"tool_calls":[{"index":1,"id":"call_2","type":"function",
+      "function":{"name":"datetime","arguments":"{}"}}]})"));
+  auto out = acc.finish();
+  REQUIRE(out.is_array());
+  REQUIRE(out.size() == 2);
+  CHECK(out[0]["id"] == "call_1");
+  CHECK(out[0]["function"]["name"] == "calculator");
+  CHECK(out[0]["function"]["arguments"] == "{\"expression\":\"1+1\"}");
+  CHECK(out[1]["function"]["name"] == "datetime");
+  // 纯文本 delta（无 tool_calls）不影响聚合
+  acc.feed(json::parse(R"({"content":"你好"})"));
+  CHECK(acc.finish().size() == 2);
+}
+
+TEST_CASE("openai: buildBody 输出 tools 与 extra") {
+  llm::ChatRequest req;
+  req.model = "demo";
+  req.messages.push_back({"system", "你是助手"});
+  req.tools = json::array(
+      {{{"type", "function"},
+        {"function", {{"name", "calculator"}, {"parameters", json::object()}}}}});
+  auto body = json::parse(llm::buildBodyForTest(req));
+  CHECK(body["model"] == "demo");
+  CHECK(body["stream"] == true);
+  REQUIRE(body["tools"].is_array());
+  CHECK(body["tools"][0]["function"]["name"] == "calculator");
+  // extra 透传
+  req.messages.push_back({"assistant", "", json{{"tool_calls", json::array()}}});
+  auto body2 = json::parse(llm::buildBodyForTest(req));
+  REQUIRE(body2["messages"].size() == 2);
+  CHECK(body2["messages"][1]["tool_calls"].is_array());
+}
