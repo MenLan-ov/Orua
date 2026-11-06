@@ -189,6 +189,9 @@ const App = {
     botAvatarRemove: false,
     memoryBotId: null,
     memories: [],
+    skills: [],
+    botSkills: {},
+    pluginBotId: null,
     detached: false,
     detachedTarget: null,
   },
@@ -225,7 +228,8 @@ const App = {
 };
 
 /* ================= 视图切换 ================= */
-function switchView(view) {
+async function switchView(view) {
+  if (App.state.detached && view === 'plugins') return;
   App.state.view = view;
   // 群聊室作为「聊天」视图内的子视图：当前群打开时以 view-groups 覆盖内容区
   const inGroupRoom = view === 'messages' && App.state.currentGroupId !== null;
@@ -233,6 +237,7 @@ function switchView(view) {
   $('view-bots').classList.toggle('hidden', view !== 'bots');
   $('view-groups').classList.toggle('hidden', view !== 'groups' && !inGroupRoom);
   $('view-memory').classList.toggle('hidden', view !== 'memory');
+  $('view-plugins').classList.toggle('hidden', view !== 'plugins');
   $('btn-new-session').classList.toggle('hidden', view !== 'messages');
   $('btn-new-bot').classList.toggle('hidden', view !== 'bots');
   $('btn-new-group').classList.toggle('hidden', view !== 'messages');
@@ -248,6 +253,16 @@ function switchView(view) {
   }
   if (view === 'messages') renderChatList();
   if (view === 'memory') { renderMemoryBots(); loadMemories(); }
+  if (view === 'plugins') {
+    if (!App.state.pluginBotId && App.state.bots.length) App.state.pluginBotId = App.state.bots[0].id;
+    try {
+      await loadSkills();
+      if (App.state.pluginBotId) await loadBotSkills(App.state.pluginBotId);
+    } catch (e) {
+      toast(e.message || '技能加载失败');
+    }
+    renderBotSkills();
+  }
 }
 
 /* ================= 单聊气泡 ================= */
@@ -699,7 +714,10 @@ function renderBotDetail() {
   $('bot-detail-greeting').textContent = b.greeting || '（无）';
 }
 
-App.registerCommand('open-bot-editor', (b) => {
+// PUT /bots/{id}/skills 是整表替换：勾选未与服务端现状对齐时保存不得提交，否则会清空既有技能
+let botSkillsAligned = false;
+
+App.registerCommand('open-bot-editor', async (b) => {
   $('bot-modal-title').textContent = b ? '编辑 Bot' : '新建 Bot';
   $('be-name').value = b?.name || '';
   $('be-avatar').value = b?.avatar || '🤖';
@@ -720,8 +738,32 @@ App.registerCommand('open-bot-editor', (b) => {
   $('be-api-model').value = b?.api_model || '';
   $('be-key-clear').checked = false;
   $('modal-bot').dataset.botId = b?.id || '';
+  $('be-skills').innerHTML = '';
+  botSkillsAligned = false;
   $('modal-bot').classList.remove('hidden');
+  try {
+    if (!App.state.skills.length) await loadSkills();
+    if (b) await loadBotSkills(b.id);
+    renderBotEditorSkills(b);
+  } catch (e) {
+    toast(e.message || '技能加载失败');
+  }
 });
+
+function renderBotEditorSkills(b) {
+  const skEl = $('be-skills');
+  skEl.innerHTML = '';
+  const saved = App.state.botSkills[b?.id] || [];
+  for (const s of App.state.skills) {
+    const on = saved.some((x) => x.skill_id === s.id && x.enabled);
+    const lab = document.createElement('label');
+    lab.className = 'member-check';
+    lab.innerHTML = `<input type="checkbox" data-beskill="${escapeHtml(s.id)}" ${on ? 'checked' : ''}>
+      <span>${escapeHtml(s.name)}</span>`;
+    skEl.appendChild(lab);
+  }
+  botSkillsAligned = true;
+}
 
 App.registerCommand('save-bot', async () => {
   const name = $('be-name').value.trim();
@@ -745,6 +787,12 @@ App.registerCommand('save-bot', async () => {
   if (id) saved = await App.api.patch(`/api/v1/bots/${id}`, body);
   else saved = await App.api.post('/api/v1/bots', body);
   const savedId = saved.id;
+  if (savedId && botSkillsAligned) {
+    const skills = [...$('be-skills').querySelectorAll('input:checked')]
+      .map((c) => ({ skill_id: c.dataset.beskill, enabled: true }));
+    await App.api.put(`/api/v1/bots/${savedId}/skills`, { skills });
+    App.state.botSkills[savedId] = skills;
+  }
   if (App.state.botAvatarRemove && savedId) {
     // 移除图片：PATCH 清空 avatar_path（Task 5 已支持直通），回到 emoji 头像
     await App.api.patch(`/api/v1/bots/${savedId}`, { avatar_path: '' });
@@ -1337,6 +1385,64 @@ function openMemoryEditor(m) {
   $('modal-memory').classList.remove('hidden');
 }
 
+/* ================= 插件 ================= */
+async function loadSkills() {
+  const res = await App.api.get('/api/v1/skills');
+  App.state.skills = res.skills || [];
+  renderSkillCards();
+}
+function renderSkillCards() {
+  const el = $('skills-list');
+  el.innerHTML = '';
+  for (const s of App.state.skills) {
+    const card = document.createElement('div');
+    card.className = 'skill-card';
+    card.innerHTML = `<h4>${escapeHtml(s.name)}</h4><p>${escapeHtml(s.description)}</p>`;
+    el.appendChild(card);
+  }
+}
+async function loadBotSkills(botId) {
+  const res = await App.api.get(`/api/v1/bots/${botId}/skills`);
+  App.state.botSkills[botId] = res.skills || [];
+  renderBotSkills();
+}
+function renderBotSkills() {
+  const sel = $('skill-bot-select');
+  sel.innerHTML = '';
+  for (const b of App.state.bots) {
+    const o = document.createElement('option');
+    o.value = b.id;
+    o.textContent = b.name;
+    if (b.id === App.state.pluginBotId) o.selected = true;
+    sel.appendChild(o);
+  }
+  const id = App.state.pluginBotId;
+  const el = $('bot-skills-list');
+  el.innerHTML = '';
+  if (!id) return;
+  const enabled = new Map((App.state.botSkills[id] || []).map((s) => [s.skill_id, s.enabled]));
+  for (const s of App.state.skills) {
+    const row = document.createElement('label');
+    row.className = 'bot-skill-row';
+    const on = enabled.get(s.id) ?? false;
+    row.innerHTML = `<span>${escapeHtml(s.name)}</span>
+      <input type="checkbox" data-skill="${escapeHtml(s.id)}" ${on ? 'checked' : ''}>`;
+    row.querySelector('input').addEventListener('change', async (e) => {
+      enabled.set(s.id, e.target.checked);
+      const skills = [...enabled].filter(([, v]) => v).map(([skill_id]) => ({ skill_id, enabled: true }));
+      try {
+        await App.api.put(`/api/v1/bots/${id}/skills`, { skills });
+        App.state.botSkills[id] = skills;
+        toast('技能已保存');
+      } catch (err) {
+        toast(err.message || '技能保存失败');
+      }
+      renderBotSkills();
+    });
+    el.appendChild(row);
+  }
+}
+
 /* ================= 设置 ================= */
 App.registerCommand('open-settings', () => {
   const c = App.state.config || {};
@@ -1427,7 +1533,8 @@ App.registerCommand('boot', async () => {
     try { App.state.reads = JSON.parse(App.state.config.chat_reads || '{}'); } catch (_) { App.state.reads = {}; }
   } catch (_) {}
   try {
-    await Promise.all([refreshBots(), refreshSessions(), refreshGroups()]);
+    await Promise.all([refreshBots(), refreshSessions(), refreshGroups(),
+                       App.state.detached ? null : loadSkills()]);
     await renderChatList();
     backendOnline(true);
   } catch (_) {
@@ -1534,6 +1641,23 @@ $('btn-group-interject').addEventListener('click', () => App.run('group-interjec
 $('btn-mem-search').addEventListener('click', () => loadMemories($('mem-search').value.trim()));
 $('mem-search').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadMemories($('mem-search').value.trim()); });
 $('btn-mem-refresh').addEventListener('click', () => loadMemories($('mem-search').value.trim()));
+
+$('skill-bot-select').addEventListener('change', async (e) => {
+  App.state.pluginBotId = Number(e.target.value);
+  try {
+    await loadBotSkills(App.state.pluginBotId);
+  } catch (err) {
+    toast(err.message || '技能加载失败');
+  }
+});
+$('btn-skill-refresh').addEventListener('click', async () => {
+  try {
+    await loadSkills();
+    if (App.state.pluginBotId) await loadBotSkills(App.state.pluginBotId);
+  } catch (e) {
+    toast(e.message || '技能加载失败');
+  }
+});
 $('btn-memory-cancel').addEventListener('click', () => $('modal-memory').classList.add('hidden'));
 $('btn-memory-save').addEventListener('click', async () => {
   if (!editingMemoryId) return;

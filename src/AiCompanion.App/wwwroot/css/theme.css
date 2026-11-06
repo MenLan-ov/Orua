@@ -428,3 +428,12 @@ label.chk input { width: auto; }
 .ctx-sub { position: fixed; z-index: 201; min-width: 200px; background: var(--bg-panel, #1e293b);
            border: 1px solid var(--border, #334155); border-radius: 10px; padding: 6px;
            box-shadow: 0 8px 24px rgba(0,0,0,.5); }
+
+/* ============ 插件视图（技能库 / Bot 技能开关） ============ */
+.skill-card { background: var(--bg-panel, #1e293b); border: 1px solid var(--border, #334155);
+              border-radius: 10px; padding: 12px; margin-bottom: 10px; }
+.skill-card h4 { margin: 0 0 4px; font-size: 14px; }
+.skill-card p { margin: 0; font-size: 12px; color: var(--text-dim, #94a3b8); }
+.bot-skill-row { display: flex; align-items: center; justify-content: space-between;
+                 padding: 10px 12px; border-radius: 8px;
+                 background: var(--bg-panel, #1e293b); margin-bottom: 8px; }

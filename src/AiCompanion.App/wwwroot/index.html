@@ -33,6 +33,7 @@
           <button class="tab-btn active" data-view="messages">聊天</button>
           <button class="tab-btn" data-view="bots">Bot</button>
           <button class="tab-btn" data-view="memory">记忆</button>
+          <button class="tab-btn" data-view="plugins">插件</button>
         </nav>
         <div class="side-actions">
           <button id="btn-new-session" class="btn-primary full">＋ 新对话</button>
@@ -173,6 +174,25 @@
           </div>
         </div>
       </div>
+
+      <div id="view-plugins" class="view hidden">
+        <div class="view-header"><h2>插件</h2></div>
+        <div class="memory-layout">
+          <div class="memory-bots">
+            <h3>技能库</h3>
+            <div id="skills-list"></div>
+          </div>
+          <div class="memory-panel">
+            <h3>Bot 技能</h3>
+            <div class="memory-toolbar">
+              <select id="skill-bot-select"></select>
+              <button id="btn-skill-refresh" class="btn-ghost">刷新</button>
+            </div>
+            <div class="mem-hint">勾选启用后，该 Bot 在单聊中可通过 Function calling 调用技能</div>
+            <div id="bot-skills-list"></div>
+          </div>
+        </div>
+      </div>
       </section>
     </div>
   </div>
@@ -240,6 +260,8 @@
       <select id="be-api-type">
         <option value="openai">OpenAI 兼容</option>
       </select>
+      <label>技能</label>
+      <div id="be-skills" class="member-checks"></div>
       <div class="modal-actions">
         <button id="btn-bot-cancel" class="btn-ghost">取消</button>
         <button id="btn-bot-save" class="btn-primary">保存</button>
