@@ -788,10 +788,9 @@ App.registerCommand('save-bot', async () => {
   else saved = await App.api.post('/api/v1/bots', body);
   const savedId = saved.id;
   if (savedId && botSkillsAligned) {
-    const skills = [...$('be-skills').querySelectorAll('input:checked')]
-      .map((c) => ({ skill_id: c.dataset.beskill, enabled: true }));
-    await App.api.put(`/api/v1/bots/${savedId}/skills`, { skills });
-    App.state.botSkills[savedId] = skills;
+    if (!id) botSkillsLoaded.add(savedId); // 新建 Bot 的服务端技能集必为空，可直接提交
+    await submitBotSkills(savedId, () => [...$('be-skills').querySelectorAll('input:checked')]
+      .map((c) => ({ skill_id: c.dataset.beskill, enabled: true })));
   }
   if (App.state.botAvatarRemove && savedId) {
     // 移除图片：PATCH 清空 avatar_path（Task 5 已支持直通），回到 emoji 头像
@@ -1386,6 +1385,12 @@ function openMemoryEditor(m) {
 }
 
 /* ================= 插件 ================= */
+// 已确认加载过服务端技能的 Bot：未确认（首次进入/加载失败）时勾选行禁用，避免按空缓存整表覆盖真实技能
+const botSkillsLoaded = new Set();
+// PUT /bots/{id}/skills 是整表替换，且并发请求的完成顺序不保证：同一时刻只发一个提交，结束后按最新状态补交一次
+let skillSubmitting = null;
+let skillPending = null;
+
 async function loadSkills() {
   const res = await App.api.get('/api/v1/skills');
   App.state.skills = res.skills || [];
@@ -1402,9 +1407,39 @@ function renderSkillCards() {
   }
 }
 async function loadBotSkills(botId) {
-  const res = await App.api.get(`/api/v1/bots/${botId}/skills`);
-  App.state.botSkills[botId] = res.skills || [];
-  renderBotSkills();
+  botSkillsLoaded.delete(botId);
+  try {
+    const res = await App.api.get(`/api/v1/bots/${botId}/skills`);
+    App.state.botSkills[botId] = res.skills || [];
+    botSkillsLoaded.add(botId);
+  } finally {
+    renderBotSkills();
+  }
+}
+function submitBotSkills(botId, readSkills) {
+  if (!botSkillsLoaded.has(botId)) return Promise.reject(new Error('技能状态未确认，已取消保存'));
+  skillPending = { botId, read: readSkills };
+  if (!skillSubmitting) skillSubmitting = runSkillSubmits();
+  return skillSubmitting;
+}
+async function runSkillSubmits() {
+  let error = null;
+  while (skillPending) {
+    const job = skillPending;
+    skillPending = null;
+    const skills = job.read();
+    try {
+      await App.api.put(`/api/v1/bots/${job.botId}/skills`, { skills });
+      // 已排队后续提交时不回写，避免用旧快照覆盖更新的用户意图
+      if (!skillPending) App.state.botSkills[job.botId] = skills;
+      error = null;
+    } catch (e) {
+      botSkillsLoaded.delete(job.botId);
+      error = e;
+    }
+  }
+  skillSubmitting = null;
+  if (error) throw error;
 }
 function renderBotSkills() {
   const sel = $('skill-bot-select');
@@ -1420,25 +1455,29 @@ function renderBotSkills() {
   const el = $('bot-skills-list');
   el.innerHTML = '';
   if (!id) return;
+  const loaded = botSkillsLoaded.has(id);
   const enabled = new Map((App.state.botSkills[id] || []).map((s) => [s.skill_id, s.enabled]));
   for (const s of App.state.skills) {
     const row = document.createElement('label');
     row.className = 'bot-skill-row';
     const on = enabled.get(s.id) ?? false;
     row.innerHTML = `<span>${escapeHtml(s.name)}</span>
-      <input type="checkbox" data-skill="${escapeHtml(s.id)}" ${on ? 'checked' : ''}>`;
-    row.querySelector('input').addEventListener('change', async (e) => {
-      enabled.set(s.id, e.target.checked);
-      const skills = [...enabled].filter(([, v]) => v).map(([skill_id]) => ({ skill_id, enabled: true }));
-      try {
-        await App.api.put(`/api/v1/bots/${id}/skills`, { skills });
-        App.state.botSkills[id] = skills;
-        toast('技能已保存');
-      } catch (err) {
-        toast(err.message || '技能保存失败');
-      }
-      renderBotSkills();
-    });
+      <input type="checkbox" data-skill="${escapeHtml(s.id)}" ${on ? 'checked' : ''}${loaded ? '' : ' disabled'}>`;
+    if (loaded) {
+      row.querySelector('input').addEventListener('change', async (e) => {
+        const next = (App.state.botSkills[id] || []).filter((x) => x.skill_id !== s.id);
+        if (e.target.checked) next.push({ skill_id: s.id, enabled: true });
+        App.state.botSkills[id] = next;
+        try {
+          await submitBotSkills(id, () => (App.state.botSkills[id] || [])
+            .filter((x) => x.enabled).map((x) => ({ skill_id: x.skill_id, enabled: true })));
+          toast('技能已保存');
+        } catch (err) {
+          toast(err.message || '技能保存失败');
+        }
+        renderBotSkills();
+      });
+    }
     el.appendChild(row);
   }
 }
