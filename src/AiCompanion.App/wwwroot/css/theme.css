@@ -425,9 +425,20 @@ label.chk input { width: auto; }
 .ctx-item:hover { background: rgba(59,130,246,.15); }
 .ctx-item.danger { color: #f87171; }
 .ctx-sep { height: 1px; background: var(--border, #334155); margin: 4px 6px; }
-.ctx-sub { position: fixed; z-index: 201; min-width: 200px; background: var(--bg-panel, #1e293b);
+.ctx-sub { position: fixed; z-index: 201; min-width: 200px; max-height: 320px; overflow: auto;
+           background: var(--bg-panel, #1e293b);
            border: 1px solid var(--border, #334155); border-radius: 10px; padding: 6px;
            box-shadow: 0 8px 24px rgba(0,0,0,.5); }
+/* 历史会话子菜单：每个会话两行（标题行 + 小按钮条） */
+.ctx-sess { padding-bottom: 4px; border-bottom: 1px solid var(--border, #334155); }
+.ctx-sess:last-child { border-bottom: none; padding-bottom: 0; }
+.ctx-sess-actions { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 8px 2px; }
+.ctx-mini-btn { font-size: 11px; line-height: 1.6; padding: 1px 8px; border-radius: 6px;
+                border: 1px solid var(--border, #334155); background: transparent;
+                color: var(--text-dim, #94a3b8); cursor: pointer; }
+.ctx-mini-btn:hover { background: var(--accent-soft, rgba(59,130,246,.15)); color: var(--accent, #3b82f6); }
+.ctx-mini-btn.danger { color: var(--danger, #ef4444); }
+.ctx-mini-btn.danger:hover { background: rgba(239, 68, 68, .14); }
 
 /* ============ 插件视图（技能库 / Bot 技能开关） ============ */
 .skill-card { background: var(--bg-panel, #1e293b); border: 1px solid var(--border, #334155);

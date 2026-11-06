@@ -321,12 +321,6 @@ async function refreshSessions() {
   App.state.sessions = await App.api.get('/api/v1/sessions');
 }
 
-// 统一聊天列表由 renderChatList() 渲染；本函数保留（T7 历史会话子菜单复用），只筛选数据、不再渲染列表
-function renderSessions() {
-  const q = App.state.search.trim().toLowerCase();
-  return App.state.sessions.filter((s) => !q || s.title.toLowerCase().includes(q));
-}
-
 /* ================= 聊天列表（Bot/群合并，QQ 式） ================= */
 function isPinned(kind, id) {
   return App.state.pinned.some((p) => p.kind === kind && p.id === id);
@@ -633,16 +627,17 @@ App.registerCommand('delete-message', async (msgId) => {
   toast('已删除');
 });
 
-App.registerCommand('clear-session', async () => {
-  const sid = App.state.currentSessionId;
+App.registerCommand('clear-session', async (sid) => {
+  sid = sid || App.state.currentSessionId;
   if (!sid) return;
-  if (!confirm('清空当前会话的全部消息？')) return;
+  if (!confirm('清空该会话的全部消息？')) return;
   await App.api.del(`/api/v1/messages?session_id=${sid}`);
+  if (sid !== App.state.currentSessionId) { toast('已清空该会话消息'); return; }
   messagesEl.innerHTML = '<div class="sysnote">开始新的对话吧 ✦</div>';
 });
 
-App.registerCommand('export-session', async () => {
-  const sid = App.state.currentSessionId;
+App.registerCommand('export-session', async (sid) => {
+  sid = sid || App.state.currentSessionId;
   if (!sid) { toast('请先选择会话'); return; }
   const fmt = await promptText('导出格式（md / json / txt）', 'md');
   if (!['md', 'json', 'txt'].includes(fmt)) return;
@@ -1277,17 +1272,46 @@ App.registerCommand('open-context-menu', (kind, id, x, y) => {
       sub.style.left = (base.right + 2) + 'px';
       sub.style.top = base.top + 'px';
       for (const s of sessions) {
-        const it = document.createElement('div');
-        it.className = 'ctx-item';
-        it.innerHTML = `<span>💬</span><span>${escapeHtml(s.title)}</span>`;
-        it.onclick = async () => {
+        const wrap = document.createElement('div');
+        wrap.className = 'ctx-sess';
+        // 第一行：打开该会话（含非默认会话）
+        const head = document.createElement('div');
+        head.className = 'ctx-item';
+        head.innerHTML = `<span>💬</span><span>${escapeHtml(s.title)}</span>` +
+          (s.id === App.state.currentSessionId ? '<span class="tag">当前</span>' : '');
+        head.onclick = (ev) => {
+          ev.stopPropagation();
           closeContextMenus();
-          // 设为默认 = touch 该会话（PATCH 原 title 刷新 updated_at）
+          App.run('select-session', s.id);
+        };
+        // 第二行：五个动作（默认 = touch 该会话刷新 updated_at）
+        const bar = document.createElement('div');
+        bar.className = 'ctx-sess-actions';
+        const miniBtn = (label, onClick, danger) => {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'ctx-mini-btn' + (danger ? ' danger' : '');
+          b.textContent = label;
+          b.onclick = (ev) => {
+            ev.stopPropagation();
+            closeContextMenus();
+            onClick();
+          };
+          return b;
+        };
+        bar.appendChild(miniBtn('默认', async () => {
           await App.api.patch(`/api/v1/sessions/${s.id}`, { title: s.title });
           await refreshSessions();
           renderChatList();
-        };
-        sub.appendChild(it);
+        }));
+        // rename/delete 命令内部已刷新会话列表，不重复渲染
+        bar.appendChild(miniBtn('重命名', () => App.run('rename-session', s.id)));
+        bar.appendChild(miniBtn('清空', () => App.run('clear-session', s.id)));
+        bar.appendChild(miniBtn('导出', () => App.run('export-session', s.id)));
+        bar.appendChild(miniBtn('删除', () => App.run('delete-session', s.id), true));
+        wrap.appendChild(head);
+        wrap.appendChild(bar);
+        sub.appendChild(wrap);
       }
       if (!sessions.length) {
         const empty = document.createElement('div');
