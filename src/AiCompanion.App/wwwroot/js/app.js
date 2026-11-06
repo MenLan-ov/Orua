@@ -233,7 +233,7 @@ function switchView(view) {
   $('view-memory').classList.toggle('hidden', view !== 'memory');
   $('btn-new-session').classList.toggle('hidden', view !== 'messages');
   $('btn-new-bot').classList.toggle('hidden', view !== 'bots');
-  $('btn-new-group').classList.toggle('hidden', view !== 'groups');
+  $('btn-new-group').classList.toggle('hidden', view !== 'messages');
   $('session-list').classList.toggle('hidden', view !== 'messages');
   $('bot-list').classList.toggle('hidden', view !== 'bots');
   $('group-list').classList.toggle('hidden', view !== 'groups');
@@ -568,6 +568,7 @@ App.registerCommand('refresh-after-chat', async () => {
   setStreamingUI(false);
   await refreshSessions(true);
   if (App.state.currentSessionId) loadMessages(App.state.currentSessionId);
+  renderChatList();
 });
 
 App.registerCommand('stop-stream', async () => {
