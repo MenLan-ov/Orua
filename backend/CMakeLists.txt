@@ -20,6 +20,7 @@ add_executable(backend
   src/event_bus.cpp
   src/group_engine.cpp
   src/memory_service.cpp
+  src/skills.cpp
   src/server.cpp
 )
 target_include_directories(backend PRIVATE src third_party)
@@ -34,6 +35,7 @@ add_executable(backend_tests
   tests/test_groups.cpp
   tests/test_memories.cpp
   tests/test_skills.cpp
+  tests/test_skills_exec.cpp
   tests/test_migration.cpp
   tests/test_config.cpp
   tests/test_dpapi.cpp
@@ -50,6 +52,7 @@ add_executable(backend_tests
   src/event_bus.cpp
   src/group_engine.cpp
   src/memory_service.cpp
+  src/skills.cpp
   src/logger.cpp
 )
 target_include_directories(backend_tests PRIVATE src third_party)
