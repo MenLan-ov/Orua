@@ -189,6 +189,8 @@ const App = {
     botAvatarRemove: false,
     memoryBotId: null,
     memories: [],
+    detached: false,
+    detachedTarget: null,
   },
   commands: new Map(),
   registerCommand(name, fn) { this.commands.set(name, fn); },
@@ -1379,6 +1381,21 @@ App.registerCommand('backend-status', (p) => {
 });
 
 App.registerCommand('boot', async () => {
+  const params = new URLSearchParams(location.search);
+  App.state.detached = params.get('window') === 'detached';
+  if (App.state.detached) {
+    $('sidebar').classList.add('hidden');
+    $('titlebar').classList.add('hidden');
+    const target = params.get('target') || (window.__DETACH_TARGET__ || '');
+    if (target.startsWith('session:')) App.state.detachedTarget = { kind: 'session', id: Number(target.slice(8)) };
+    else if (target.startsWith('group:')) App.state.detachedTarget = { kind: 'group', id: Number(target.slice(6)) };
+    // 独立窗口轮询：3s 拉最新消息（单聊）
+    setInterval(async () => {
+      if (App.state.detachedTarget?.kind === 'session' && App.state.currentSessionId) {
+        await loadMessages(App.state.currentSessionId);
+      }
+    }, 3000);
+  }
   try {
     App.state.config = await App.api.get('/api/v1/config');
     applyTheme(App.state.config.theme);
@@ -1398,6 +1415,13 @@ App.registerCommand('boot', async () => {
     $('messages').classList.add('hidden');
     $('composer').classList.add('hidden');
     $('chat-empty').classList.remove('hidden');
+  }
+  if (App.state.detached) {
+    if (App.state.detachedTarget?.kind === 'session') {
+      App.run('select-session', App.state.detachedTarget.id);
+    } else if (App.state.detachedTarget?.kind === 'group') {
+      App.run('open-group-room', App.state.detachedTarget.id);
+    }
   }
 });
 

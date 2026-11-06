@@ -1,4 +1,5 @@
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
@@ -10,6 +11,7 @@ namespace AiCompanion.App;
 public partial class MainWindow : Window
 {
     private BackendProcess? _backend;
+    private readonly Dictionary<string, ChatWindow> _detached = new();
 
     public MainWindow()
     {
@@ -42,7 +44,7 @@ public partial class MainWindow : Window
         await InitWebViewAsync();
     }
 
-    private static int ReadApiPort()
+    internal static int ReadApiPort()
     {
         var cfgPath = Path.Combine(DataDir, "config.json");
         try
@@ -111,6 +113,21 @@ public partial class MainWindow : Window
                     case BridgeProtocol.ActionDrag: BeginCaptionDrag(); break;
                     case BridgeProtocol.ActionMaxDbl: SendCaptionDblClk(); break;
                     case BridgeProtocol.ActionSysMenu: ShowSystemMenu(); break;
+                    case BridgeProtocol.ActionOpenDetach:
+                        {
+                            var target = doc.RootElement.GetProperty("payload")
+                                .GetProperty("target").GetString();
+                            if (string.IsNullOrEmpty(target)) break;
+                            if (_detached.TryGetValue(target, out var existing)) {
+                                existing.Activate();
+                                break;
+                            }
+                            var w = new ChatWindow(target, _backend?.ApiPort ?? ReadApiPort());
+                            _detached[target] = w;
+                            w.Closed += (_, _) => _detached.Remove(target);
+                            w.Show();
+                            break;
+                        }
                 }
             });
         }
@@ -189,6 +206,7 @@ public partial class MainWindow : Window
 
     private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
+        foreach (var w in _detached.Values.ToList()) { try { w.Close(); } catch { } }
         _backend?.Dispose();
     }
 }
