@@ -23,6 +23,7 @@
 #include "logger.h"
 #include "memory_service.h"
 #include "openai_provider.h"
+#include "skills.h"
 
 namespace srv {
 namespace {
@@ -361,6 +362,18 @@ void runChat(int64_t sessionId, const std::string& content, bool appendUser,
   req.proxy_host = db::getSetting("proxy_host").value_or("");
   req.proxy_port = proxyPort;
 
+  // v4：携带该 Bot 启用技能的 tools 定义
+  for (auto& s : db::listBotSkills(bot ? bot->id : 0)) {
+    if (!s.enabled) continue;
+    for (auto& def : sk::registry()) {
+      if (def.id != s.skill_id) continue;
+      req.tools.push_back({{"type", "function"},
+                           {"function", {{"name", def.id},
+                                         {"description", def.description},
+                                         {"parameters", def.params_schema}}}});
+    }
+  }
+
   auto stop = std::make_shared<std::atomic_bool>(false);
   {
     std::lock_guard<std::mutex> lk(g_stopMtx);
@@ -382,28 +395,58 @@ void runChat(int64_t sessionId, const std::string& content, bool appendUser,
                                                              httplib::DataSink& sink) {
         try {
           llm::OpenAiCompatProvider provider;
-          provider.streamChat(
-              req,
-              [&](const llm::StreamEvent& e) {
-                if (!sink.is_writable()) {
-                  stop->store(true);
-                  return;
-                }
-                if (e.type == "delta") {
-                  *full += e.content;
-                  json j = {{"content", e.content}};
-                  std::string sse = "event: delta\ndata: " + j.dump() + "\n\n";
-                  sink.write(sse.data(), sse.size());
-                } else if (e.type == "error") {
-                  *hadError = true;
-                  *errCode = e.error_code;
-                  *errMsg = e.message;
-                  json j = {{"code", e.error_code}, {"message", e.message}};
-                  std::string sse = "event: error\ndata: " + j.dump() + "\n\n";
-                  sink.write(sse.data(), sse.size());
-                }
-              },
-              *stop);
+          llm::ChatRequest cur = req;
+          for (int round = 0; round < 3; ++round) {
+            std::string toolCallsJson;
+            provider.streamChat(
+                cur,
+                [&](const llm::StreamEvent& e) {
+                  if (!sink.is_writable()) {
+                    stop->store(true);
+                    return;
+                  }
+                  if (e.type == "delta") {
+                    *full += e.content;
+                    json j = {{"content", e.content}};
+                    std::string sse = "event: delta\ndata: " + j.dump() + "\n\n";
+                    sink.write(sse.data(), sse.size());
+                  } else if (e.type == "tool_calls") {
+                    toolCallsJson = e.data;
+                  } else if (e.type == "error") {
+                    *hadError = true;
+                    *errCode = e.error_code;
+                    *errMsg = e.message;
+                    json j = {{"code", e.error_code}, {"message", e.message}};
+                    std::string sse = "event: error\ndata: " + j.dump() + "\n\n";
+                    sink.write(sse.data(), sse.size());
+                  }
+                },
+                *stop);
+            if (*hadError || *stop || toolCallsJson.empty()) break;
+            // 执行工具并回填，进入下一轮
+            json tcs;
+            try {
+              tcs = json::parse(toolCallsJson);
+            } catch (...) {
+              break;
+            }
+            json assistantExtra = {{"tool_calls", tcs}};
+            cur.messages.push_back({"assistant", "", assistantExtra});
+            for (auto& tc : tcs) {
+              std::string name = tc["function"].value("name", "");
+              std::string callId = tc.value("id", "call_unknown");
+              json params = json::object();
+              try {
+                std::string args = tc["function"].value("arguments", "{}");
+                auto parsed = json::parse(args);
+                if (parsed.is_object()) params = parsed;
+              } catch (...) {
+              }
+              json result = sk::execute(name, params);
+              cur.messages.push_back(
+                  {"tool", result.dump(), json{{"tool_call_id", callId}}});
+            }
+          }
           {
             std::lock_guard<std::mutex> lk(g_stopMtx);
             g_stopFlags.erase(sessionId);
@@ -802,6 +845,61 @@ void registerGroupRoutes(httplib::Server& svr) {
   });
 }
 
+/* ---------- 技能路由（v4） ---------- */
+
+void registerSkillRoutes(httplib::Server& svr) {
+  svr.Get("/api/v1/skills", [](const httplib::Request&, httplib::Response& res) {
+    json arr = json::array();
+    for (auto& s : sk::registry())
+      arr.push_back({{"id", s.id},
+                     {"name", s.name},
+                     {"description", s.description},
+                     {"params_schema", s.params_schema}});
+    res.set_content(okJson(json{{"skills", arr}}).dump(), "application/json; charset=utf-8");
+  });
+
+  svr.Get(R"(/api/v1/bots/(\d+)/skills)", [](const httplib::Request& req, httplib::Response& res) {
+    int64_t id = std::stoll(req.matches[1].str());
+    if (!db::getBot(id)) {
+      fail(res, 404, 404, "Bot 不存在");
+      return;
+    }
+    json arr = json::array();
+    for (auto& s : db::listBotSkills(id))
+      arr.push_back({{"skill_id", s.skill_id}, {"enabled", s.enabled}});
+    res.set_content(okJson(json{{"skills", arr}}).dump(), "application/json; charset=utf-8");
+  });
+
+  svr.Put(R"(/api/v1/bots/(\d+)/skills)", [](const httplib::Request& req, httplib::Response& res) {
+    int64_t id = std::stoll(req.matches[1].str());
+    if (!db::getBot(id)) {
+      fail(res, 404, 404, "Bot 不存在");
+      return;
+    }
+    json b = parseBody(req, res);
+    if (res.status == 400) return;
+    if (!b.contains("skills") || !b["skills"].is_array()) {
+      fail(res, 400, 400, "skills 必须为数组");
+      return;
+    }
+    std::vector<std::pair<std::string, bool>> skills;
+    for (auto& s : b["skills"]) {
+      std::string sid = s.value("skill_id", "");
+      bool on = s.value("enabled", true);
+      bool known = false;
+      for (auto& def : sk::registry())
+        if (def.id == sid) known = true;
+      if (!known) {
+        fail(res, 400, 400, "未知技能：" + sid);
+        return;
+      }
+      skills.push_back({sid, on});
+    }
+    db::setBotSkills(id, skills);
+    res.set_content(okJson(json::object()).dump(), "application/json; charset=utf-8");
+  });
+}
+
 /* ---------- 记忆路由（v3） ---------- */
 
 void registerMemoryRoutes(httplib::Server& svr) {
@@ -1125,6 +1223,7 @@ void registerRoutes(httplib::Server& svr, const std::string& staticDir) {
     res.set_content("{\"status\":\"ok\",\"version\":\"3.0.0\"}", "application/json; charset=utf-8");
   });
 
+  registerSkillRoutes(svr);
   registerMemoryRoutes(svr);
   registerConfigRoutes(svr);
   registerBotRoutes(svr);

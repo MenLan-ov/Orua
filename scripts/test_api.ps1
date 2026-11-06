@@ -217,6 +217,27 @@ $m = Invoke-RestMethod "$base/api/v1/messages?session_id=$sid&limit=10"
 Assert-True ($m.data.Count -eq 2) "messages count=$($m.data.Count)"
 Assert-True (($m.data | Where-Object role -eq 'assistant').content.Length -gt 0) 'assistant message stored'
 
+# ---- v4: 技能全链路（LLM_MOCK：calculator tool_call → 回填 → 「计算结果：2」） ----
+$skList = Invoke-RestMethod "$base/api/v1/skills"
+Assert-True ($skList.code -eq 0) 'skills list code'
+Assert-True ($skList.data.skills.Count -eq 6) 'skills count 6'
+Invoke-Json 'Put' "$base/api/v1/bots/$defaultBotId/skills" @{ skills = @(@{ skill_id = 'calculator'; enabled = $true }) } | Out-Null
+$bsk = Invoke-RestMethod "$base/api/v1/bots/$defaultBotId/skills"
+Assert-True ($bsk.data.skills.Count -eq 1) 'bot skills set'
+Assert-True ($bsk.data.skills[0].skill_id -eq 'calculator' -and $bsk.data.skills[0].enabled) 'calculator enabled'
+$pfile4 = Join-Path $env:TEMP 'ac_v4_chat.json'
+$tmpM2 = Join-Path $env:TEMP 'ac_v4_sse.txt'
+[IO.File]::WriteAllText($pfile4, '{"session_id":' + $sid + ',"content":"帮我算一下 1+1"}')
+& curl.exe -s -N -X POST "$base/api/v1/chat/stream" -H "Content-Type: application/json" --data-binary "@$pfile4" -o $tmpM2
+Assert-True ((Get-Content $tmpM2 -Raw) -match 'event: done') 'v4 skill chat done'
+Start-Sleep -Seconds 2
+$m4 = Invoke-RestMethod "$base/api/v1/messages?session_id=$sid&limit=6"
+# 消息接口按 id 倒序（最新在前）：最新一条 assistant 即本次技能回复
+$lastA = $m4.data | Where-Object role -eq 'assistant' | Select-Object -First 1
+Assert-True ($lastA.content -match '计算结果：2') 'skill result 2 in reply'
+# 关闭技能后回退普通 mock 回复
+Invoke-Json 'Put' "$base/api/v1/bots/$defaultBotId/skills" @{ skills = @() } | Out-Null
+
 # ---- v3: 私聊记忆提取端到端（上段 chat 已触发异步提取） ----
 $memGot = $null
 for ($i = 0; $i -lt 20; $i++) {
@@ -260,7 +281,7 @@ $sse3 = Get-Content $tmp3 -Raw -Encoding UTF8
 Remove-Item $tmp3, $rfile
 Assert-True ($sse3 -match 'event: done') 'regenerate done'
 $m2 = Invoke-RestMethod "$base/api/v1/messages?session_id=$sid&limit=10"
-Assert-True ($m2.data.Count -eq 4) 'regenerate keeps 4 messages'
+Assert-True ($m2.data.Count -eq 6) 'regenerate keeps 4 messages'
 
 # 导出 md 与 json
 $tmp4 = Join-Path $env:TEMP 'ac_export.md'
@@ -273,7 +294,7 @@ $tmp5 = Join-Path $env:TEMP 'ac_export.json'
 & curl.exe -s -X POST "$base/api/v1/export?session_id=$sid&format=json" -o $tmp5
 $j = Get-Content $tmp5 -Raw -Encoding UTF8 | ConvertFrom-Json
 Remove-Item $tmp5
-Assert-True ($j.messages.Count -eq 4) 'export json message count'
+Assert-True ($j.messages.Count -eq 6) 'export json message count'
 
 # 清空会话消息
 Invoke-RestMethod "$base/api/v1/messages?session_id=$sid" -Method Delete | Out-Null
