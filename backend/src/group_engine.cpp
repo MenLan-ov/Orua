@@ -5,6 +5,7 @@
 #include "db.h"
 #include "dpapi_util.h"
 #include "logger.h"
+#include "memory_service.h"
 
 namespace grp {
 
@@ -216,6 +217,18 @@ bool GroupEngine::runTurn(const Member& m, int turn) {
   db::appendGroupMessage(groupId_, m.bot_id, "assistant", full);
   db::touchGroup(groupId_);
   broadcast("turn_end", {{"bot_id", m.bot_id}});
+  // v3：轮末异步提取该 Bot 的群记忆（最近 4 条群消息作对话快照）
+  {
+    auto snap = db::listGroupMessages(groupId_, 4);
+    std::string dialogue;
+    for (auto& gm : snap) {
+      std::string who = "用户";
+      if (gm.bot_id > 0)
+        if (auto b = db::getBot(gm.bot_id)) who = b->name;
+      dialogue += who + "：" + gm.content + "\n";
+    }
+    mem::MemoryService::instance().enqueueExtract(m.bot_id, "group", groupId_, dialogue);
+  }
   return true;
 }
 
@@ -250,7 +263,16 @@ llm::ChatRequest GroupEngine::buildRequest(const db::Bot& bot) {
   auto group = db::getGroup(groupId_);
   if (group && !group->topic.empty())
     req.messages.push_back({"system", "当前群聊话题：" + group->topic});
-  auto msgs = db::listGroupMessages(groupId_, 20);   // 最近 20 条
+  auto msgs = db::listGroupMessages(groupId_, 12);   // 最近 12 条（v3：随记忆块缩小）
+  std::string recent;
+  for (auto& gm : msgs) recent += gm.content + "\n";
+  auto mems =
+      mem::MemoryService::instance().pickMemories(bot.id, "group", groupId_, recent, 5);
+  if (!mems.empty()) {
+    std::string block = "[长期记忆]\n";
+    for (const auto& m : mems) block += "· " + m.content + "\n";
+    req.messages.push_back({"system", block});
+  }
   for (auto& gm : msgs) {
     if (gm.bot_id == 0) {
       req.messages.push_back({"user", gm.content});

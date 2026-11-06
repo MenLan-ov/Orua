@@ -8,6 +8,7 @@
 
 #include "db.h"
 #include "group_engine.h"
+#include "memory_service.h"
 
 namespace {
 std::filesystem::path tmpDb(const char* name) {
@@ -80,6 +81,7 @@ void waitUntil(const std::function<bool()>& cond, int timeoutMs = 5000) {
 TEST_CASE("engine: 按 position 轮转并落库") {
   auto path = tmpDb("ac_v2_engine_rotate.db");
   REQUIRE(db::open(path.string()));
+  db::setSetting("memory_extraction", "0");   // 引擎测试不触发提取 LLM 调用
   db::Bot ba; ba.name = "甲"; ba.system_prompt = "你是甲";
   db::Bot bb; bb.name = "乙"; bb.system_prompt = "你是乙";
   auto b1 = db::createBot(ba), b2 = db::createBot(bb);
@@ -109,9 +111,10 @@ TEST_CASE("engine: 按 position 轮转并落库") {
   std::filesystem::remove(path);
 }
 
-TEST_CASE("engine: 上下文 = 人设 + 话题 + 最近20条（不含他人人设）") {
+TEST_CASE("engine: 上下文 = 人设 + 话题 + 最近12条（不含他人人设）") {
   auto path = tmpDb("ac_v2_engine_ctx.db");
   REQUIRE(db::open(path.string()));
+  db::setSetting("memory_extraction", "0");   // 引擎测试不触发提取 LLM 调用
   db::Bot ba; ba.name = "甲"; ba.system_prompt = "你是甲";
   auto b1 = db::createBot(ba);
   auto g = db::createGroup("上下文群", "话题Y");
@@ -134,13 +137,13 @@ TEST_CASE("engine: 上下文 = 人设 + 话题 + 最近20条（不含他人人�
     std::lock_guard<std::mutex> lk(fake.reqMtx);
     ctx = fake.lastMessages;
   }
-  REQUIRE(ctx.size() == 22);               // system + 话题 + 20 条窗口
+  REQUIRE(ctx.size() == 14);               // system + 话题 + 12 条窗口
   CHECK(ctx[0].role == "system");
   CHECK(ctx[0].content == "你是甲");
   CHECK(ctx[1].role == "system");
   CHECK(ctx[1].content == "当前群聊话题：话题Y");
-  CHECK(ctx[2].content == "msg5");         // 25 条截取最近 20 → 从 msg5 开始
-  CHECK(ctx[21].content == "msg24");
+  CHECK(ctx[2].content == "msg13");        // 25 条截取最近 12 → 从 msg13 开始
+  CHECK(ctx[13].content == "msg24");
   db::close();
   std::filesystem::remove(path);
 }
@@ -148,6 +151,7 @@ TEST_CASE("engine: 上下文 = 人设 + 话题 + 最近20条（不含他人人�
 TEST_CASE("engine: 单轮失败重试一次并跳过（不计成功轮）") {
   auto path = tmpDb("ac_v2_engine_fail.db");
   REQUIRE(db::open(path.string()));
+  db::setSetting("memory_extraction", "0");   // 引擎测试不触发提取 LLM 调用
   auto b1 = db::createBot([] {
     db::Bot b; b.name = "坏"; b.system_prompt = "x"; return b;
   }());
@@ -175,6 +179,7 @@ TEST_CASE("engine: 单轮失败重试一次并跳过（不计成功轮）") {
 TEST_CASE("engine: 永远失败 → 每轮调用2次（重试1次）且不落库") {
   auto path = tmpDb("ac_v2_engine_fail2.db");
   REQUIRE(db::open(path.string()));
+  db::setSetting("memory_extraction", "0");   // 引擎测试不触发提取 LLM 调用
   auto b1 = db::createBot([] {
     db::Bot b; b.name = "坏"; b.system_prompt = "x"; return b;
   }());
@@ -200,6 +205,7 @@ TEST_CASE("engine: 永远失败 → 每轮调用2次（重试1次）且不落库
 TEST_CASE("engine: 暂停/继续/停止") {
   auto path = tmpDb("ac_v2_engine_pause.db");
   REQUIRE(db::open(path.string()));
+  db::setSetting("memory_extraction", "0");   // 引擎测试不触发提取 LLM 调用
   auto def = db::getDefaultBot();
   REQUIRE(def.has_value());
   auto g = db::createGroup("控制群", "");
@@ -235,6 +241,7 @@ TEST_CASE("engine: 暂停/继续/停止") {
 TEST_CASE("engine: 插话落库并广播 interject 事件") {
   auto path = tmpDb("ac_v2_engine_interject.db");
   REQUIRE(db::open(path.string()));
+  db::setSetting("memory_extraction", "0");   // 引擎测试不触发提取 LLM 调用
   auto def = db::getDefaultBot();
   REQUIRE(def.has_value());
   auto g = db::createGroup("插话群", "");
@@ -266,6 +273,7 @@ TEST_CASE("engine: 插话落库并广播 interject 事件") {
 TEST_CASE("engine: 停用/被删机器人跳过且多群并行互不干扰") {
   auto path = tmpDb("ac_v2_engine_skip.db");
   REQUIRE(db::open(path.string()));
+  db::setSetting("memory_extraction", "0");   // 引擎测试不触发提取 LLM 调用
   auto b1 = db::createBot([] {
     db::Bot b; b.name = "A"; b.system_prompt = "x"; return b;
   }());
@@ -312,6 +320,7 @@ TEST_CASE("engine: 停用/被删机器人跳过且多群并行互不干扰") {
 TEST_CASE("engine: registry 单实例与移除") {
   auto path = tmpDb("ac_v2_engine_registry.db");
   REQUIRE(db::open(path.string()));
+  db::setSetting("memory_extraction", "0");   // 引擎测试不触发提取 LLM 调用
   auto def = db::getDefaultBot();
   REQUIRE(def.has_value());
   auto g = db::createGroup("注册群", "");
@@ -332,4 +341,66 @@ TEST_CASE("engine: registry 单实例与移除") {
   CHECK(s1->state() == "idle");
   db::close();
   std::filesystem::remove(path);
+}
+
+TEST_CASE("engine: 群记忆块注入与 turn_end 提取触发") {
+  auto path = tmpDb("ac_v3_engine_memory.db");
+  REQUIRE(db::open(path.string()));
+  db::setSetting("memory_extraction", "0");   // 本用例前半段关闭提取
+  db::Bot ba; ba.name = "甲"; ba.system_prompt = "你是甲";
+  auto b1 = db::createBot(ba);
+  auto g = db::createGroup("记忆群", "");
+  db::setGroupMembers(g.id, {b1.id});
+  db::appendGroupMessage(g.id, 0, "user", "msg海边测试");
+  // 标签与最近对话同词 → 本地召回命中；阶段 2 无网络 → 降级阶段 1 前 5
+  db::addMemory(b1.id, "group", g.id, "用户喜欢海边", "[\"海边\"]", 0);
+
+  FakeStream fake;
+  fake.pieces = {"好"};
+  Collector col;
+  grp::GroupEngine e(g.id, std::ref(fake));
+  e.subscribe(std::ref(col));
+  REQUIRE(e.start());
+  waitUntil([&] { return col.count("turn_end") >= 1; });
+  REQUIRE(e.stop());
+
+  bool found = false;
+  {
+    std::lock_guard<std::mutex> lk(fake.reqMtx);
+    for (auto& m : fake.lastMessages)
+      if (m.role == "system" && m.content.find("用户喜欢海边") != std::string::npos)
+        found = true;
+  }
+  CHECK(found);
+  db::close();
+  std::filesystem::remove(path);
+}
+
+TEST_CASE("engine: turn_end 后提取群记忆落库（LLM_MOCK）") {
+  _putenv_s("LLM_MOCK", "1");
+  auto path = tmpDb("ac_v3_engine_extract.db");
+  REQUIRE(db::open(path.string()));
+  db::Bot ba; ba.name = "甲"; ba.system_prompt = "你是甲";
+  auto b1 = db::createBot(ba);
+  auto g = db::createGroup("提取群", "");
+  db::setGroupMembers(g.id, {b1.id});
+
+  FakeStream fake;
+  fake.pieces = {"你好"};
+  Collector col;
+  grp::GroupEngine e(g.id, std::ref(fake));
+  e.subscribe(std::ref(col));
+  REQUIRE(e.start());
+  waitUntil([&] { return col.count("turn_end") >= 1; });
+  REQUIRE(e.stop());
+  waitUntil([&] { return db::listMemories(b1.id, "group", g.id).size() >= 2; });
+
+  auto mems = db::listMemories(b1.id, "group", g.id);
+  REQUIRE(mems.size() == 2);
+  CHECK(mems[0].bot_id == b1.id);
+  CHECK(mems[0].group_id == g.id);
+  CHECK(mems[0].scope == "group");
+  db::close();
+  std::filesystem::remove(path);
+  _putenv_s("LLM_MOCK", "");
 }
