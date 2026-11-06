@@ -69,3 +69,27 @@ TEST_CASE("chat: newUser 为空时不追加（regenerate 场景）") {
   REQUIRE(ctx.size() == 3);  // system + user + assistant，不重复追加 user
   CHECK(ctx[2].content == "content-2");
 }
+
+TEST_CASE("chat_service: 记忆块注入（system prompt 后、历史前）") {
+  std::vector<db::Message> hist = {{1, 1, "user", "你好", ""}, {2, 1, "assistant", "你好呀", ""}};
+  std::vector<db::Memory> mems = {
+      {1, 3, "private", 0, "用户喜欢咖啡", "[\"咖啡\"]", 0, "", ""},
+      {2, 3, "private", 0, "用户生日五月", "[\"生日\"]", 0, "", ""}};
+  auto ctx = chat::buildContext("你是助手", hist, 20, "今天喝什么", mems);
+  REQUIRE(ctx.size() == 5);   // system + 记忆块 + user + assistant + 新 user
+  CHECK(ctx[0].role == "system");
+  CHECK(ctx[0].content == "你是助手");
+  CHECK(ctx[1].role == "system");
+  CHECK(ctx[1].content.find("[长期记忆]") == 0);
+  CHECK(ctx[1].content.find("· 用户喜欢咖啡") != std::string::npos);
+  CHECK(ctx[1].content.find("· 用户生日五月") != std::string::npos);
+  CHECK(ctx[2].content == "你好");
+  CHECK(ctx[4].content == "今天喝什么");
+}
+
+TEST_CASE("chat_service: 空记忆 = v2 原行为") {
+  std::vector<db::Message> hist = {{1, 1, "user", "你好", ""}};
+  auto ctx = chat::buildContext("你是助手", hist, 20, "", {});
+  REQUIRE(ctx.size() == 2);
+  CHECK(ctx[1].content == "你好");
+}
