@@ -32,6 +32,9 @@ struct Bot {
   std::string api_base_url;
   std::string api_key_enc;
   std::string api_model;
+  int max_tokens = 2048;
+  std::string api_type = "openai";
+  std::string avatar_path;   // 空 = 用 emoji 头像；否则相对 data 目录的图片路径
   std::string created_at;
   std::string updated_at;
 };
@@ -58,6 +61,17 @@ struct GroupMessage {
   std::string role;     // "user" | "assistant"
   std::string content;
   std::string created_at;
+};
+struct Memory {
+  int64_t id = 0;
+  int64_t bot_id = 0;
+  std::string scope;      // "private" | "group"
+  int64_t group_id = 0;   // 库内 NULL；private 为 0
+  std::string content;
+  std::string tags;       // JSON 数组字符串，如 "[\"咖啡\"]"
+  int64_t source_msg_id = 0;
+  std::string created_at;
+  std::string updated_at;
 };
 
 bool open(const std::string& dbPath);
@@ -86,6 +100,16 @@ bool deleteBot(int64_t id);            // 默认机器人返回 false
 std::vector<Bot> listBots();
 std::optional<Bot> getBot(int64_t id);
 bool setBotEnabled(int64_t id, bool enabled);
+Memory addMemory(int64_t botId, const std::string& scope, int64_t groupId,
+                 const std::string& content, const std::string& tags,
+                 int64_t sourceMsgId = 0);
+bool updateMemoryContent(int64_t id, const std::string& content);
+bool deleteMemory(int64_t id);
+std::vector<Memory> listMemories(int64_t botId, const std::string& scope = "",
+                                 int64_t groupId = -1, const std::string& q = "");
+void deleteMemoriesByBot(int64_t botId);
+void deleteMemoriesByGroup(int64_t groupId);
+std::string dataDir();
 std::optional<Bot> getDefaultBot();    // settings default_bot_id，兜底取第一个
 
 Group createGroup(const std::string& name, const std::string& topic);

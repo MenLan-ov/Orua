@@ -1,6 +1,7 @@
 #include "db.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <mutex>
 #include <stdexcept>
 
@@ -13,6 +14,7 @@ namespace {
 
 sqlite3* g_db = nullptr;
 std::recursive_mutex g_mtx;
+std::string g_dataDir;
 
 const char* kSchema = R"SQL(
 PRAGMA journal_mode=WAL;
@@ -57,6 +59,9 @@ CREATE TABLE IF NOT EXISTS bots (
   api_base_url  TEXT NOT NULL DEFAULT '',
   api_key_enc   TEXT NOT NULL DEFAULT '',
   api_model     TEXT NOT NULL DEFAULT '',
+  max_tokens   INTEGER NOT NULL DEFAULT 2048,
+  api_type     TEXT NOT NULL DEFAULT 'openai',
+  avatar_path  TEXT,
   created_at    TEXT NOT NULL,
   updated_at    TEXT NOT NULL
 );
@@ -84,6 +89,19 @@ CREATE TABLE IF NOT EXISTS group_messages (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_group_messages_group ON group_messages(group_id, id);
+CREATE TABLE IF NOT EXISTS bot_memories (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_id INTEGER NOT NULL,
+  scope TEXT NOT NULL CHECK(scope IN ('private','group')),
+  group_id INTEGER,
+  content TEXT NOT NULL,
+  tags TEXT NOT NULL DEFAULT '[]',
+  source_msg_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_mem_bot ON bot_memories(bot_id, scope);
+CREATE INDEX IF NOT EXISTS idx_mem_group ON bot_memories(bot_id, group_id);
 )SQL";
 
 std::string colText(sqlite3_stmt* st, int i) {
@@ -148,9 +166,26 @@ Bot rowToBot(sqlite3_stmt* st) {
   b.api_base_url = colText(st, 7);
   b.api_key_enc = colText(st, 8);
   b.api_model = colText(st, 9);
-  b.created_at = colText(st, 10);
-  b.updated_at = colText(st, 11);
+  b.max_tokens = static_cast<int>(colInt(st, 10));
+  b.api_type = colText(st, 11);
+  b.avatar_path = colText(st, 12);
+  b.created_at = colText(st, 13);
+  b.updated_at = colText(st, 14);
   return b;
+}
+
+Memory rowToMemory(sqlite3_stmt* st) {
+  Memory m;
+  m.id = colInt(st, 0);
+  m.bot_id = colInt(st, 1);
+  m.scope = colText(st, 2);
+  m.group_id = colInt(st, 3);
+  m.content = colText(st, 4);
+  m.tags = colText(st, 5);
+  m.source_msg_id = colInt(st, 6);
+  m.created_at = colText(st, 7);
+  m.updated_at = colText(st, 8);
+  return m;
 }
 
 }  // namespace
@@ -158,6 +193,7 @@ Bot rowToBot(sqlite3_stmt* st) {
 bool open(const std::string& dbPath) {
   std::lock_guard<std::recursive_mutex> lock(g_mtx);
   if (g_db) return true;
+  g_dataDir = std::filesystem::path(dbPath).parent_path().string();
   if (sqlite3_open(dbPath.c_str(), &g_db) != SQLITE_OK) {
     logx::error("db open failed: " + std::string(sqlite3_errmsg(g_db)));
     sqlite3_close(g_db);
@@ -174,6 +210,21 @@ bool open(const std::string& dbPath) {
           });
     if (!hasBotId)
       exec("ALTER TABLE sessions ADD COLUMN bot_id INTEGER NOT NULL DEFAULT 0");
+
+    // bots 新列（v3：max_tokens/api_type/avatar_path），幂等：新库建表后同样走此路径
+    auto ensureBotCol = [&](const char* col, const char* ddl) {
+      bool has = false;
+      query("PRAGMA table_info(bots)", {},
+            [&](sqlite3_stmt* st) {
+              if (colText(st, 1) == col) has = true;
+            });
+      if (!has) exec(ddl);
+    };
+    ensureBotCol("max_tokens",
+                 "ALTER TABLE bots ADD COLUMN max_tokens INTEGER NOT NULL DEFAULT 2048");
+    ensureBotCol("api_type",
+                 "ALTER TABLE bots ADD COLUMN api_type TEXT NOT NULL DEFAULT 'openai'");
+    ensureBotCol("avatar_path", "ALTER TABLE bots ADD COLUMN avatar_path TEXT");
 
     // personas → bots 一次性迁移（幂等：bots 已有数据则跳过）
     bool hasBots = false;
@@ -326,11 +377,12 @@ Bot createBot(const Bot& b) {
   std::lock_guard<std::recursive_mutex> lock(g_mtx);
   std::string ts = nowIso();
   execute("INSERT INTO bots(name,avatar,greeting,system_prompt,temperature,is_enabled,"
-          "api_base_url,api_key_enc,api_model,created_at,updated_at) "
-          "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+          "api_base_url,api_key_enc,api_model,max_tokens,api_type,avatar_path,"
+          "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
           {b.name, b.avatar, b.greeting, b.system_prompt,
            std::to_string(b.temperature), b.is_enabled ? "1" : "0",
-           b.api_base_url, b.api_key_enc, b.api_model, ts, ts});
+           b.api_base_url, b.api_key_enc, b.api_model,
+           std::to_string(b.max_tokens), b.api_type, b.avatar_path, ts, ts});
   Bot out = b;
   out.id = sqlite3_last_insert_rowid(g_db);
   out.created_at = out.updated_at = ts;
@@ -340,10 +392,13 @@ Bot createBot(const Bot& b) {
 bool updateBot(const Bot& b) {
   std::lock_guard<std::recursive_mutex> lock(g_mtx);
   execute("UPDATE bots SET name=?,avatar=?,greeting=?,system_prompt=?,temperature=?,"
-          "is_enabled=?,api_base_url=?,api_key_enc=?,api_model=?,updated_at=? WHERE id=?",
+          "is_enabled=?,api_base_url=?,api_key_enc=?,api_model=?,max_tokens=?,"
+          "api_type=?,avatar_path=?,updated_at=? WHERE id=?",
           {b.name, b.avatar, b.greeting, b.system_prompt,
            std::to_string(b.temperature), b.is_enabled ? "1" : "0",
-           b.api_base_url, b.api_key_enc, b.api_model, nowIso(), std::to_string(b.id)});
+           b.api_base_url, b.api_key_enc, b.api_model,
+           std::to_string(b.max_tokens), b.api_type, b.avatar_path,
+           nowIso(), std::to_string(b.id)});
   return sqlite3_changes(g_db) > 0;
 }
 
@@ -354,6 +409,7 @@ bool deleteBot(int64_t id) {
   execute("UPDATE sessions SET bot_id=0 WHERE bot_id=?", {std::to_string(id)});
   execute("DELETE FROM group_members WHERE bot_id=?", {std::to_string(id)});
   execute("DELETE FROM bots WHERE id=?", {std::to_string(id)});
+  deleteMemoriesByBot(id);
   return true;
 }
 
@@ -361,8 +417,8 @@ std::vector<Bot> listBots() {
   std::lock_guard<std::recursive_mutex> lock(g_mtx);
   std::vector<Bot> out;
   query("SELECT id,name,avatar,greeting,system_prompt,temperature,is_enabled,"
-        "api_base_url,api_key_enc,api_model,created_at,updated_at "
-        "FROM bots ORDER BY id ASC",
+        "api_base_url,api_key_enc,api_model,max_tokens,api_type,avatar_path,"
+        "created_at,updated_at FROM bots ORDER BY id ASC",
         {}, [&](sqlite3_stmt* st) { out.push_back(rowToBot(st)); });
   return out;
 }
@@ -371,8 +427,8 @@ std::optional<Bot> getBot(int64_t id) {
   std::lock_guard<std::recursive_mutex> lock(g_mtx);
   std::optional<Bot> out;
   query("SELECT id,name,avatar,greeting,system_prompt,temperature,is_enabled,"
-        "api_base_url,api_key_enc,api_model,created_at,updated_at "
-        "FROM bots WHERE id=?",
+        "api_base_url,api_key_enc,api_model,max_tokens,api_type,avatar_path,"
+        "created_at,updated_at FROM bots WHERE id=?",
         {std::to_string(id)},
         [&](sqlite3_stmt* st) { out = rowToBot(st); });
   return out;
@@ -397,8 +453,8 @@ std::optional<Bot> getDefaultBot() {
   }
   std::optional<Bot> out;
   query("SELECT id,name,avatar,greeting,system_prompt,temperature,is_enabled,"
-        "api_base_url,api_key_enc,api_model,created_at,updated_at "
-        "FROM bots ORDER BY id ASC LIMIT 1",
+        "api_base_url,api_key_enc,api_model,max_tokens,api_type,avatar_path,"
+        "created_at,updated_at FROM bots ORDER BY id ASC LIMIT 1",
         {}, [&](sqlite3_stmt* st) { out = rowToBot(st); });
   return out;
 }
@@ -459,6 +515,7 @@ void touchGroup(int64_t id) {
 void deleteGroup(int64_t id) {
   std::lock_guard<std::recursive_mutex> lock(g_mtx);
   execute("DELETE FROM groups WHERE id=?", {std::to_string(id)});
+  deleteMemoriesByGroup(id);
 }
 
 std::vector<Group> listGroups() {
@@ -553,5 +610,74 @@ void setSetting(const std::string& key, const std::string& value) {
           "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
           {key, value});
 }
+
+Memory addMemory(int64_t botId, const std::string& scope, int64_t groupId,
+                 const std::string& content, const std::string& tags,
+                 int64_t sourceMsgId) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  std::string ts = nowIso();
+  execute("INSERT INTO bot_memories(bot_id,scope,group_id,content,tags,source_msg_id,"
+          "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+          {std::to_string(botId), scope, groupId == 0 ? "" : std::to_string(groupId),
+           content, tags, sourceMsgId == 0 ? "" : std::to_string(sourceMsgId), ts, ts});
+  Memory m;
+  m.id = sqlite3_last_insert_rowid(g_db);
+  m.bot_id = botId; m.scope = scope; m.group_id = groupId;
+  m.content = content; m.tags = tags; m.source_msg_id = sourceMsgId;
+  m.created_at = m.updated_at = ts;
+  return m;
+}
+
+bool updateMemoryContent(int64_t id, const std::string& content) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  execute("UPDATE bot_memories SET content=?, updated_at=? WHERE id=?",
+          {content, nowIso(), std::to_string(id)});
+  return sqlite3_changes(g_db) > 0;
+}
+
+bool deleteMemory(int64_t id) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  execute("DELETE FROM bot_memories WHERE id=?", {std::to_string(id)});
+  return sqlite3_changes(g_db) > 0;
+}
+
+std::vector<Memory> listMemories(int64_t botId, const std::string& scope,
+                                 int64_t groupId, const std::string& q) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  std::vector<Memory> out;
+  std::string sql =
+      "SELECT id,bot_id,scope,COALESCE(group_id,0),content,tags,"
+      "COALESCE(source_msg_id,0),created_at,updated_at "
+      "FROM bot_memories WHERE bot_id=?";
+  std::vector<std::string> params = {std::to_string(botId)};
+  if (scope == "private" || scope == "group") {
+    sql += " AND scope=?";
+    params.push_back(scope);
+  }
+  if (groupId >= 0) {
+    sql += " AND group_id=?";
+    params.push_back(std::to_string(groupId));
+  }
+  if (!q.empty()) {
+    sql += " AND (content LIKE ? OR tags LIKE ?)";
+    params.push_back("%" + q + "%");
+    params.push_back("%" + q + "%");
+  }
+  sql += " ORDER BY updated_at DESC, id DESC";
+  query(sql.c_str(), params, [&](sqlite3_stmt* st) { out.push_back(rowToMemory(st)); });
+  return out;
+}
+
+void deleteMemoriesByBot(int64_t botId) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  execute("DELETE FROM bot_memories WHERE bot_id=?", {std::to_string(botId)});
+}
+
+void deleteMemoriesByGroup(int64_t groupId) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  execute("DELETE FROM bot_memories WHERE group_id=?", {std::to_string(groupId)});
+}
+
+std::string dataDir() { return g_dataDir; }
 
 }  // namespace db
