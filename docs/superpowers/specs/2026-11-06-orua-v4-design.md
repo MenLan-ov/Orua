@@ -1,0 +1,175 @@
+# Orua v4 设计规格：聊天列表 QQ 化与 Bot 技能插件系统
+
+> 参考 UI：QQ 好友/群聊合并列表布局、QQ 右键菜单、插件面板。
+> 本规格在 v3（2026-11-06-orua-v3-design.md）之上增量演进，v1/v2/v3 全部功能与测试保持有效。
+
+## 1. 目标
+
+1. **聊天列表 QQ 化**：侧栏「消息」更名「聊天」，单聊与群聊合并为同一列表（QQ 好友式布局）；每个 Bot 一个聊天项，点击进入其最近会话；「＋ 新对话」保留（同一 Bot 可多会话，v1 多会话不丢）。
+2. **QQ 式右键菜单**：列表项右键菜单（置顶 / 标记未读 / 重命名·清空·导出 / 从列表移除 / 打开独立聊天窗口），按项类型（会话/Bot/群）适配。
+3. **独立聊天窗口**：把任一会话/群聊在独立 WPF 窗口中打开，与主窗口并行。
+4. **插件框与 Bot 技能**：侧栏新增「插件」页签；6 个内置技能（计算器/时间日期/系统信息/HTTP 请求/读取文件/定时提醒），Bot 勾选启用后经 Function calling 在单聊中触发执行。
+
+## 2. 总体架构（变更点）
+
+- **前端**：侧栏 4 页签「聊天 / Bot / 记忆 / 插件」；聊天页单聊+群聊合并列表（置顶区+普通区、未读红点）；右键菜单组件；插件页（技能库 + Bot 技能开关）；Bot 编辑器加技能多选。
+- **WPF 壳**：新增 `ChatWindow`（独立 WebView2，复用同一前端与桥协议）；主窗口关闭时联动关闭全部独立窗口。
+- **后端**：`llm::ChatRequest` 增加 `tools`；OpenAI 流式解析扩展 tool_calls 分片拼接；单聊 runChat 增加「工具调用 → 执行 → 回填 → 续聊」循环（≤3 轮）；新增技能执行器注册表与 6 个执行器；新增 `bot_skills`/`reminders` 表与对应 API。
+- **数据层**：新增两表（幂等迁移）；置顶/未读水位存 settings JSON。
+
+## 3. 数据模型
+
+### 3.1 新表（幂等，IF NOT EXISTS）
+
+```sql
+CREATE TABLE IF NOT EXISTS bot_skills (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_id INTEGER NOT NULL,
+  skill_id TEXT NOT NULL,          -- calculator|datetime|sysinfo|http_get|file_read|reminder
+  enabled INTEGER NOT NULL DEFAULT 1,
+  params TEXT NOT NULL DEFAULT '{}',  -- 预留参数（首版均默认）
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(bot_id, skill_id)
+);
+
+CREATE TABLE IF NOT EXISTS reminders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_id INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  due_at TEXT NOT NULL,            -- ISO 8601
+  done INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+```
+
+- 级联：删除 Bot → 清其 bot_skills 与 reminders。
+
+### 3.2 settings 新键（JSON 字符串，缺省空）
+
+| 键 | 含义 | 缺省 |
+|---|---|---|
+| `chat_pinned` | 置顶列表：`[{"kind":"session|bot|group","id":N}]` | `[]` |
+| `chat_reads` | 未读水位：`{"bot:<id>":"<ISO时间>","group:<id>":"<ISO时间>"}` | `{}` |
+
+- 未读语义：对应目标在 last_read 之后的新消息数 > 0 → 列表项红点；进入会话/群聊室后刷新该键；重启保留。
+
+### 3.3 既有表
+
+- sessions 复用：Bot 项的「默认会话」= 该 Bot 最近更新的会话（`WHERE bot_id=? ORDER BY updated_at DESC LIMIT 1`），无则前端创建（`POST /api/v1/sessions {bot_id}`）。
+
+## 4. 聊天列表（前端信息架构）
+
+- 侧栏页签：**聊天**（原「消息」）/ Bot / 记忆 / **插件**；「群聊」页签取消，群项并入聊天列表。
+- 列表结构：置顶区 + 普通区（按最近活跃排序）；项类型两类：
+  - **Bot 项**：头像（图片/emoji）+ 名字 + 最近消息预览 + 时间；点击 → 该 Bot 最近会话；未读红点。
+  - **群项**：头像（首个成员拼图或群图标）+ 群名 + 成员数·预览 + 时间；点击 → 群聊室；运行中的群显示「进行中」徽标。
+- 「＋ 新对话」保留：弹窗选 Bot 开新会话；同一 Bot 的多会话通过 Bot 项右键菜单进入管理。
+- 未读/置顶数据经 config API 读写（见 §8）；切换页签/启动时从 REST 全量重建列表。
+
+## 5. 右键菜单
+
+- 触发：列表项右键（自绘菜单，QQ 风格：图标+文字，深色）。
+- 菜单项按类型：
+
+| 菜单项 | Bot 项 | 群项 |
+|---|---|---|
+| 置顶 / 取消置顶 | ✓ | ✓ |
+| 标记未读 | ✓ | ✓ |
+| 历史会话…（子菜单） | ✓ | — |
+| 编辑 Bot | ✓ | — |
+| 记忆库 | ✓ | — |
+| 群设置（改名/话题） | — | ✓ |
+| 打开独立聊天窗口（Bot 项=其默认会话） | ✓ | ✓ |
+| 从列表移除（删除） | 删 Bot（默认 Bot 1001 禁删） | 删群 |
+
+- 「历史会话…」子菜单：列出该 Bot 全部会话（按最近更新），子项支持：设为默认（切换点击进入的会话）/ 重命名 / 清空 / 导出 / 删除。
+- 「从列表移除」= 真实删除（复用既有 1001/404 语义，确认弹窗二次确认）。
+
+## 6. 独立聊天窗口
+
+- WPF 新增 `ChatWindow`（xaml + cs）：独立 WebView2（独立 CoreWebView2Environment，用户数据目录 `WebView2Data-detached`），加载 `https://app.local/index.html?window=detached&target=session:<id>|group:<id>`。
+- 前端 detached 模式：隐藏侧栏/标题栏按钮组，仅渲染聊天区；窗口标题 = Bot 名 / 群名。
+- 主窗口右键「打开独立聊天窗口」→ 桥协议新增 action `opendetach`（payload 带 target）→ WPF 建窗；**每目标至多一个独立窗口**，重复打开聚焦已有。
+- 同步：单聊消息轻轮询（3s 拉最新消息）；群聊室独立 SSE 订阅（后端多订阅者已支持）；发送/控制走同一 REST API。
+- 生命周期：主窗口关闭时关闭全部独立窗口；后端进程仍由主窗口守护（独立窗口不持有 BackendProcess）。
+
+## 7. 技能/插件系统（后端 Function calling）
+
+### 7.1 管线
+
+- `llm::ChatRequest` 增加 `json tools`（默认空数组）；OpenAI 兼容流式解析器扩展 `tool_calls`：按 `index` 聚合分片，拼接 `function.name` 与 `function.arguments`（arguments 为 JSON 字符串分片）。
+- 单聊 `runChat`：
+  1. 组装请求时携带该 Bot 启用技能的 tools 定义（name/description/parameters JSON Schema）；
+  2. 流式响应若含 tool_calls（仅非流式文本时）：对每个调用执行对应技能，结果以 `{"role":"tool","tool_call_id":...,"content":结果}` 回填消息列表；
+  3. 重新发起请求继续对话，**最多 3 轮**；超过轮数停止并把已得文本返回；
+  4. 最终正常文本照常 SSE 流式输出。
+- 技能执行失败：回填错误文本（如「技能执行失败：<原因>」），对话继续，不中断。
+- 群聊引擎：**首版不启用技能**（tools 支持列后续迭代）。
+- `LLM_MOCK=1`：mock 流先返回一次 `calculator` tool_call（`1+1`），收到回填「2」后输出「计算结果：2」——全链路确定性可测。
+
+### 7.2 技能执行器（后端 skills.h/.cpp 注册表）
+
+接口：`struct SkillExecutor { std::string id; std::string name; std::string description; json paramsSchema; std::function<json(const json& params)> execute; };` + 注册表查询。
+
+| id | 名称 | 说明 | 实现与安全约束 |
+|---|---|---|---|
+| `calculator` | 计算器 | 四则运算表达式 | 自制解析器仅支持 `+-*/()` 数字与空格；非法输入返回错误，**无 eval** |
+| `datetime` | 时间日期 | 当前时间/日期/星期 | 本地系统时间，零依赖 |
+| `sysinfo` | 系统信息 | CPU/内存/磁盘占用 | WinAPI（GetSystemTimes/GlobalMemoryStatusEx/GetDiskFreeSpaceEx） |
+| `http_get` | HTTP 请求 | GET 网页返回正文摘要 | WinHTTP；≤2KB 截断、10s 超时；**拒绝 localhost/127.*/内网段（10./172.16-31./192.168.）防 SSRF** |
+| `file_read` | 读取文件 | 读取本地文本文件 | 指定路径；≤8KB 截断；失败返回错误文本 |
+| `reminder` | 定时提醒 | 设置提醒 | 解析时间（相对分钟或绝对时间）→ 写入 reminders 表 |
+
+### 7.3 前端插件页
+
+- 侧栏「插件」页签：左侧技能库（6 卡片：图标/名称/说明/参数说明）；右侧「Bot 技能」：选中 Bot 的开关列表（默认全关；新 Bot 默认关）。
+- Bot 编辑器弹窗增加「技能」多选区（与插件页同一数据）。
+
+## 8. 后端 API（信封与错误码沿用；不新增错误码）
+
+- `GET /api/v1/skills` → `data:{skills:[{id,name,description,paramsSchema}]}`（内置技能库）
+- `GET /api/v1/bots/{id}/skills` → `data:{skills:[{skill_id,enabled}]}`
+- `PUT /api/v1/bots/{id}/skills` body `{skills:[{skill_id,enabled}]}` → 全量覆盖该 Bot 开关
+- `GET /api/v1/reminders?due=1` → `data:{reminders:[{id,bot_id,content,due_at,done}]}`（due=1 只返回到期未完成）
+- `POST /api/v1/reminders/{id}/done` → 标记完成
+- `GET/POST /api/v1/config` 扩展键：`chat_pinned`、`chat_reads`（JSON 字符串直通）
+
+## 9. 错误处理
+
+- 无新增错误码；沿用 1001-1004、404、400。
+- 技能执行失败不中断对话（回填错误文本）；tools 解析失败忽略该工具调用。
+- 独立窗口后端断连：沿用横幅+重连机制（复用前端逻辑）。
+
+## 10. 测试策略
+
+- 单测（backend_tests 扩展）：
+  - 技能执行器：calculator 正常/非法输入、datetime/sysinfo 返回形状、http_get 内网拒绝、file_read 截断与错误、reminder 写入；
+  - tool_calls 流式分片拼接（跨 chunk 的 arguments）；runChat 工具循环 ≤3 轮；
+  - bot_skills/reminders CRUD 与级联；config 新键读写。
+- 集成（test_api.ps1 扩展，LLM_MOCK）：
+  - 技能全链路：发消息 → tool_call → 执行 → 回填 → 最终回复「计算结果：2」；
+  - skills/bot_skills API 回环；reminders 到期查询与完成；
+  - v1-v3 全部既有断言保持通过。
+- 前端：node --check + dotnet 构建 0 警告；实机验收清单（§12）。
+
+## 11. 明确排除项
+
+- 第三方插件 SDK / 插件安装市场（插件框仅管理内置技能）；
+- 群聊中的技能调用（后续迭代）；
+- 技能自定义参数 UI（首版全部默认参数）；
+- 任意数量独立窗口（每目标至多 1 个）；
+- 系统级通知/托盘（提醒用前端 toast）；
+- 未读消息的服务端计数推送（本地水位方案即可）。
+
+## 12. 验收标准
+
+1. 侧栏页签为「聊天 / Bot / 记忆 / 插件」；聊天页单聊与群聊同一列表，QQ 好友式布局。
+2. 每个 Bot 一个聊天项，点击进入其最近会话（无会话自动创建）；同一 Bot 多会话入口在右键菜单。
+3. 右键菜单按项类型显示正确项集；删除有确认；默认 Bot 删除返回 1001 提示。
+4. 置顶与未读红点生效，重启后保留。
+5. 独立聊天窗口：打开/发送/同步/主窗口关闭联动；同一目标重复打开聚焦已有窗口。
+6. 插件页展示 6 个技能卡片；Bot 技能开关与编辑器勾选同步生效。
+7. 单聊中 Bot 调用技能并给出正确结果（真实 API 或 LLM_MOCK 均可验证）。
+8. 提醒到期前端弹出提示；HTTP 技能拒绝内网地址；文件技能超过 8KB 截断。
+9. v1/v2/v3 功能与自动化测试全绿；旧库升级零破坏。
