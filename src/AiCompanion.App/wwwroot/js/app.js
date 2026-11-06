@@ -1387,9 +1387,25 @@ function openMemoryEditor(m) {
 /* ================= 插件 ================= */
 // 已确认加载过服务端技能的 Bot：未确认（首次进入/加载失败）时勾选行禁用，避免按空缓存整表覆盖真实技能
 const botSkillsLoaded = new Set();
-// PUT /bots/{id}/skills 是整表替换，且并发请求的完成顺序不保证：同一时刻只发一个提交，结束后按最新状态补交一次
-let skillSubmitting = null;
-let skillPending = null;
+// PUT /bots/{id}/skills 是整表替换，且并发请求的完成顺序不保证：按 Bot 记录「链在飞 + 最后一次待提交意图 + 最后一次服务端确认集」
+const skillWrites = new Map();
+function skillWriteState(botId) {
+  let st = skillWrites.get(botId);
+  if (!st) { st = { running: false, pending: null, trusted: [] }; skillWrites.set(botId, st); }
+  return st;
+}
+function newSkillJob(readSkills) {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return {
+    read: readSkills,
+    promise,
+    done: () => resolve(),
+    fail: (e) => reject(e),
+    follow(next) { next.then(resolve, reject); },
+  };
+}
 
 async function loadSkills() {
   const res = await App.api.get('/api/v1/skills');
@@ -1411,6 +1427,7 @@ async function loadBotSkills(botId) {
   try {
     const res = await App.api.get(`/api/v1/bots/${botId}/skills`);
     App.state.botSkills[botId] = res.skills || [];
+    skillWriteState(botId).trusted = App.state.botSkills[botId];
     botSkillsLoaded.add(botId);
   } finally {
     renderBotSkills();
@@ -1418,28 +1435,40 @@ async function loadBotSkills(botId) {
 }
 function submitBotSkills(botId, readSkills) {
   if (!botSkillsLoaded.has(botId)) return Promise.reject(new Error('技能状态未确认，已取消保存'));
-  skillPending = { botId, read: readSkills };
-  if (!skillSubmitting) skillSubmitting = runSkillSubmits();
-  return skillSubmitting;
-}
-async function runSkillSubmits() {
-  let error = null;
-  while (skillPending) {
-    const job = skillPending;
-    skillPending = null;
-    const skills = job.read();
-    try {
-      await App.api.put(`/api/v1/bots/${job.botId}/skills`, { skills });
-      // 已排队后续提交时不回写，避免用旧快照覆盖更新的用户意图
-      if (!skillPending) App.state.botSkills[job.botId] = skills;
-      error = null;
-    } catch (e) {
-      botSkillsLoaded.delete(job.botId);
-      error = e;
-    }
+  const st = skillWriteState(botId);
+  const job = newSkillJob(readSkills);
+  // 同一 Bot 只保留最后一次待提交意图，且提交时刻才读当前状态，新 payload 已含旧意图 → 旧调用方跟随新结果
+  if (st.pending) st.pending.follow(job.promise);
+  st.pending = job;
+  if (!st.running) {
+    st.running = true; // 置位在调用之前：链可能同步跑完并在 finally 里复位
+    runSkillSubmits(botId, st);
   }
-  skillSubmitting = null;
-  if (error) throw error;
+  return job.promise;
+}
+async function runSkillSubmits(botId, st) {
+  try {
+    while (st.pending) {
+      const job = st.pending;
+      st.pending = null;
+      try {
+        const skills = job.read();
+        await App.api.put(`/api/v1/bots/${botId}/skills`, { skills });
+        st.trusted = skills;
+        botSkillsLoaded.add(botId);
+        // 已排队后续提交时不回写，避免用旧快照覆盖更新的用户意图
+        if (!st.pending) App.state.botSkills[botId] = skills;
+        job.done();
+      } catch (e) {
+        botSkillsLoaded.delete(botId);
+        // 写失败 = 服务端未变，回滚乐观勾选（同 Bot 已有更新意图时不回滚，让最后一次操作胜出）
+        if (!st.pending) App.state.botSkills[botId] = st.trusted;
+        job.fail(e);
+      }
+    }
+  } finally {
+    st.running = false;
+  }
 }
 function renderBotSkills() {
   const sel = $('skill-bot-select');
