@@ -120,11 +120,15 @@ class Typewriter {
   }
 }
 
-async function consumeSse(url, body, handlers) {
+// 页面由 WebView2 以虚拟主机 https://app.local 提供，相对路径会打到虚拟主机目录
+// （ERR_FILE_NOT_FOUND），必须拼上后端真实地址。App.api.req 一直是 API_BASE + path，
+// 只有这里从 v1 起漏拼——所有既有测试都用相对路径 stub 或 curl 直打后端，从未在
+// 真实 WebView2 里点过发送，所以一直没暴露。
+async function consumeSse(path, body, handlers) {
   const ctrl = new AbortController();
   App.state.abortCtrl = ctrl;
   try {
-    const res = await fetch(url, {
+    const res = await fetch(API_BASE + path, {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),

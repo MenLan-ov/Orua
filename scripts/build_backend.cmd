@@ -2,6 +2,11 @@
 setlocal
 cd /d "%~dp0.."
 
+rem VS 安装路径可能含中文（如 D:\...\VS\本体）。vswhere 按 UTF-8 输出，而 cmd 默认
+rem 代码页会把路径转成乱码，导致后面 if not exist 判定失败、误报「cmake not found」。
+rem 切到 65001 让 for /f 拿到的路径与磁盘上的真实路径一致。
+chcp 65001 >nul
+
 rem ---- locate CMake/CTest (fall back to the Visual Studio install dir) ----
 set "CMAKEEXE=cmake"
 set "CTESTEXE=ctest"

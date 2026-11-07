@@ -1282,7 +1282,7 @@ void registerRoutes(httplib::Server& svr, const std::string& staticDir,
   });
 
   svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
-    res.set_content("{\"status\":\"ok\",\"version\":\"5.0.0\"}", "application/json; charset=utf-8");
+    res.set_content("{\"status\":\"ok\",\"version\":\"5.1.0\"}", "application/json; charset=utf-8");
   });
 
   registerSkillRoutes(svr);

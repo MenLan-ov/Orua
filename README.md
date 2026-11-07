@@ -218,6 +218,17 @@ dotnet publish src\AiCompanion.App -c Release -r win-x64
 5. **版本三处同源 `4.1.0`**：exe 文件/产品版本、`/health`、侧栏脚注统一；脚注 boot 时读 `/health` 覆盖，反映实际连上的后端产物，避免 UI 与产物各说各话。
 6. **可证伪闸门**：三个 stub 检查脚本（`check-reminders-ui.mjs` 109 条 / `check-bot-skills-ui.mjs` 54 条 / `check-failure-visibility.mjs` 19 条）固化进 `scripts/checks/`，断言必须能被旧代码证伪——修复前副本跑应有 FAIL，修复后全 PASS。
 
+## v5.1 变更
+
+> v5.1 是 **v5.0 实机验收的缺陷修复版**。核心是一个从 v1 潜伏至今、所有自动化测试都没抓到的 bug。
+
+1. **聊天请求漏拼 `API_BASE`（致命）**：`consumeSse()` 从 v1 起用裸相对路径 `fetch(url)`，而页面由 WebView2 以虚拟主机 `https://app.local` 提供，请求因此被解析成 `https://app.local/api/v1/chat/stream` → `net::ERR_FILE_NOT_FOUND`，界面只显示 `Failed to fetch`——**单聊与重新生成全部不可用**。`App.api.req` 一直是 `API_BASE + path`，只有 `consumeSse` 漏拼。
+   - 为何长期未被发现：所有既有测试要么用相对路径 stub，要么用 curl 直打后端，**从未在真实 WebView2 里点过「发送」**。
+   - 修复：`consumeSse(path, ...)` 内部改为 `fetch(API_BASE + path)`；并把「真实点击发送且不出现 Failed to fetch」固化成 `scripts/smoke_gui.mjs` 的断言。
+2. **`build_backend.cmd` 在中文路径下误报 cmake 缺失**：VS 安装路径含中文（`D:\...\VS\本体`）时，`vswhere` 按 UTF-8 输出而 cmd 默认代码页转码成乱码，`if not exist` 判定失败，导致 `publish.cmd` 无法一键构建。修复：脚本开头 `chcp 65001`。
+3. **版本号升至 5.1.0**：exe 文件/产品版本、`/health`、侧栏脚注三处同源。
+4. **`smoke_gui.mjs` 支持 `CDP_PORT` 环境变量**，不再硬编码 9222，便于与其它调试实例并存。
+
 ## v5 变更
 
 1. **`file_read` 目录白名单**：仅允许读取 data 目录、系统临时目录，以及设置表 `file_read_allowlist`（分号分隔的绝对根目录）显式追加的路径；8KB 硬截断不变，越界路径直接拒绝。
@@ -293,3 +304,13 @@ dotnet publish src\AiCompanion.App -c Release -r win-x64
 4. `max_tokens` / `temperature` / `keep_rounds` / `proxy_port` 服务端收窄（ctest 覆盖）
 5. event_bus Webhook 有界分派（并发 ≤8、队列 ≤256），单次 emit 仍 ≤400ms 送达（ctest 覆盖）
 6. v1–v4.1 功能与自动化测试全绿；版本号三处 5.0.0
+
+### v5.1
+
+1. 单聊「发送」在真实 WebView2 中可用：请求打到 `http://127.0.0.1:<port>/api/v1/chat/stream`，不再出现 `Failed to fetch`（`smoke_gui.mjs` 真实点击断言覆盖）
+2. 「重新生成」可用（与单聊同走 `consumeSse`，同一修复）
+3. 全部 5 处 `fetch` 均以 `API_BASE` 开头，无裸相对路径请求
+4. `scripts\build_backend.cmd` 在 VS 安装路径含中文时能正确找到 cmake/ctest，`publish.cmd` 一键跑通
+5. `dist\Orua\AiCompanion.exe` 文件版本为 `5.1.0.0`、产品名 `Orua`；`/health` 返回 `5.1.0`；侧栏脚注显示 `v5.1`
+6. `smoke_gui.mjs` 支持 `CDP_PORT` 环境变量
+7. v1–v5.0 功能与自动化测试全绿（ctest 91 用例 / 777 断言、三个 stub 闸门 109/54/19、`test_api.ps1`）
