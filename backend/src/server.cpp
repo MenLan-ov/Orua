@@ -867,6 +867,170 @@ void registerGroupRoutes(httplib::Server& svr) {
 
 /* ---------- 技能与提醒路由（v4） ---------- */
 
+/* ---------- 插件路由（v0.5.2） ----------
+ * 此前 config.json 里有 plugins 数组，但没有任何接口能读写它——用户想加自制插件
+ * 只能手改 JSON 且重启才生效，UI 上也完全没有入口。这里补齐 CRUD：
+ *   GET    /api/v1/plugins          列出全部插件
+ *   POST   /api/v1/plugins          新增（同名视为更新，便于「编辑」复用同一接口）
+ *   DELETE /api/v1/plugins/{name}   删除
+ * 每次写操作都回写 config.json 并热重载 EventBus，无需重启后端。
+ */
+
+namespace {
+
+constexpr size_t kMaxPlugins = 32;
+constexpr size_t kMaxPluginName = 64;
+constexpr size_t kMaxPluginUrl = 2048;
+constexpr size_t kMaxPluginEvents = 16;
+
+// 事件白名单：与 EventBus::emit 实际会发出的事件保持一致，
+// 避免用户填了永远不会触发的事件名却以为插件在工作。
+bool isKnownEvent(const std::string& e) {
+  return e == "chat.completed" || e == "chat.error" || e == "session.created" ||
+         e == "session.deleted";
+}
+
+// 插件 URL 只允许 http(s)。插件是由用户主动添加的主动出网点，
+// 但同样不接受 file:// / javascript: 之类，防止误配成奇怪的东西。
+bool isHttpUrl(const std::string& u) {
+  if (u.rfind("http://", 0) == 0 && u.size() > 7) return true;
+  if (u.rfind("https://", 0) == 0 && u.size() > 8) return true;
+  return false;
+}
+
+json pluginToJson(const cfg::Plugin& p) {
+  return {{"name", p.name}, {"url", p.url}, {"events", p.events}};
+}
+
+// 校验并归一化一条插件；失败返回空串并写入 err。
+std::string normalizePlugin(const json& body, cfg::Plugin& out, std::string& err) {
+  if (!body.is_object()) {
+    err = "插件必须是 JSON 对象";
+    return "";
+  }
+  out.name = body.value("name", "");
+  out.url = body.value("url", "");
+  // 去首尾空白，避免用户粘贴时带上换行/空格导致 URL 解析失败
+  auto trim = [](std::string s) {
+    size_t b = s.find_first_not_of(" \t\r\n");
+    size_t e = s.find_last_not_of(" \t\r\n");
+    return b == std::string::npos ? std::string() : s.substr(b, e - b + 1);
+  };
+  out.name = trim(out.name);
+  out.url = trim(out.url);
+
+  if (out.name.empty()) {
+    err = "插件名称不能为空";
+    return "";
+  }
+  if (out.name.size() > kMaxPluginName) {
+    err = "插件名称过长（上限 64 字符）";
+    return "";
+  }
+  if (out.url.empty()) {
+    err = "Webhook 地址不能为空";
+    return "";
+  }
+  if (out.url.size() > kMaxPluginUrl) {
+    err = "Webhook 地址过长（上限 2048 字符）";
+    return "";
+  }
+  if (!isHttpUrl(out.url)) {
+    err = "Webhook 地址必须以 http:// 或 https:// 开头";
+    return "";
+  }
+
+  out.events.clear();
+  if (body.contains("events") && body["events"].is_array()) {
+    for (auto& e : body["events"]) {
+      if (!e.is_string()) continue;
+      std::string ev = e.get<std::string>();
+      if (!isKnownEvent(ev)) {
+        err = "未知事件：" + ev + "（可选 chat.completed / chat.error / session.created / session.deleted）";
+        return "";
+      }
+      if (std::find(out.events.begin(), out.events.end(), ev) == out.events.end())
+        out.events.push_back(ev);
+    }
+  }
+  if (out.events.size() > kMaxPluginEvents) {
+    err = "订阅事件过多";
+    return "";
+  }
+  return out.name;
+}
+
+}  // namespace
+
+void registerPluginRoutes(httplib::Server& svr, const std::string& cfgPath) {
+  svr.Get("/api/v1/plugins", [cfgPath](const httplib::Request&, httplib::Response& res) {
+    auto sc = cfg::load(cfgPath);
+    json arr = json::array();
+    for (auto& p : sc.plugins) arr.push_back(pluginToJson(p));
+    json events = json::array({"chat.completed", "chat.error", "session.created",
+                               "session.deleted"});
+    res.set_content(okJson(json{{"plugins", arr}, {"available_events", events}}).dump(),
+                    "application/json; charset=utf-8");
+  });
+
+  svr.Post("/api/v1/plugins", [cfgPath](const httplib::Request& req, httplib::Response& res) {
+    if (cfgPath.empty()) {
+      fail(res, 500, 500, "配置路径未初始化");
+      return;
+    }
+    json body = parseBody(req, res);
+    if (res.status == 400) return;
+
+    cfg::Plugin p;
+    std::string err;
+    if (normalizePlugin(body, p, err).empty()) {
+      fail(res, 400, 400, err);
+      return;
+    }
+
+    auto sc = cfg::load(cfgPath);
+    auto it = std::find_if(sc.plugins.begin(), sc.plugins.end(),
+                           [&](const cfg::Plugin& x) { return x.name == p.name; });
+    bool updated = it != sc.plugins.end();
+    if (updated) {
+      *it = p;  // 同名即更新，前端「编辑」复用同一接口
+    } else {
+      if (sc.plugins.size() >= kMaxPlugins) {
+        fail(res, 400, 400, "插件数量已达上限（32 个）");
+        return;
+      }
+      sc.plugins.push_back(p);
+    }
+
+    cfg::save(cfgPath, sc);
+    ev::EventBus::instance().loadPlugins(sc.plugins);  // 热重载，无需重启后端
+    res.set_content(
+        okJson(json{{"plugin", pluginToJson(p)}, {"updated", updated}}).dump(),
+        "application/json; charset=utf-8");
+  });
+
+  svr.Delete(R"(/api/v1/plugins/(.+))",
+             [cfgPath](const httplib::Request& req, httplib::Response& res) {
+               if (cfgPath.empty()) {
+                 fail(res, 500, 500, "配置路径未初始化");
+                 return;
+               }
+               std::string name = req.matches[1].str();
+               auto sc = cfg::load(cfgPath);
+               auto it = std::find_if(sc.plugins.begin(), sc.plugins.end(),
+                                      [&](const cfg::Plugin& x) { return x.name == name; });
+               if (it == sc.plugins.end()) {
+                 fail(res, 404, 404, "插件不存在：" + name);
+                 return;
+               }
+               sc.plugins.erase(it);
+               cfg::save(cfgPath, sc);
+               ev::EventBus::instance().loadPlugins(sc.plugins);
+               res.set_content(okJson(json{{"deleted", name}}).dump(),
+                               "application/json; charset=utf-8");
+             });
+}
+
 void registerSkillRoutes(httplib::Server& svr) {
   svr.Get("/api/v1/skills", [](const httplib::Request&, httplib::Response& res) {
     json arr = json::array();
@@ -1250,7 +1414,7 @@ void registerExportRoute(httplib::Server& svr) {
 }  // namespace
 
 void registerRoutes(httplib::Server& svr, const std::string& staticDir,
-                    const std::string& authToken) {
+                    const std::string& authToken, const std::string& cfgPath) {
   svr.set_pre_routing_handler([authToken](const httplib::Request& req, httplib::Response& res) {
     std::string origin = req.get_header_value("Origin");
     bool allowed = origin == "https://app.local" ||
@@ -1282,10 +1446,11 @@ void registerRoutes(httplib::Server& svr, const std::string& staticDir,
   });
 
   svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
-    res.set_content("{\"status\":\"ok\",\"version\":\"5.1.0\"}", "application/json; charset=utf-8");
+    res.set_content("{\"status\":\"ok\",\"version\":\"0.5.2\"}", "application/json; charset=utf-8");
   });
 
   registerSkillRoutes(svr);
+  registerPluginRoutes(svr, cfgPath);
   registerMemoryRoutes(svr);
   registerConfigRoutes(svr);
   registerBotRoutes(svr);

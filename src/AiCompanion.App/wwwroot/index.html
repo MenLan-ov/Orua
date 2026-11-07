@@ -52,7 +52,7 @@
             <span id="status-text">连接中…</span>
           </div>
           <div class="foot-buttons">
-            <span id="foot-version" class="foot-version">v5.1</span>
+            <span id="foot-version" class="foot-version">v0.5.2</span>
             <button id="btn-settings" class="btn-ghost">⚙ 设置</button>
             <button id="btn-quit" class="btn-ghost">退出</button>
           </div>
@@ -176,20 +176,66 @@
       </div>
 
       <div id="view-plugins" class="view hidden">
-        <div class="view-header"><h2>插件</h2></div>
-        <div class="memory-layout">
-          <div class="memory-bots">
-            <h3>技能库</h3>
-            <div id="skills-list"></div>
-          </div>
-          <div class="memory-panel">
-            <h3>Bot 技能</h3>
-            <div class="memory-toolbar">
-              <select id="skill-bot-select"></select>
-              <button id="btn-skill-refresh" class="btn-ghost">刷新</button>
+        <div class="view-header">
+          <h2>插件</h2>
+          <button id="btn-plugin-add" class="btn-primary">+ 添加插件</button>
+        </div>
+        <div class="plugin-layout">
+          <div class="plugin-col">
+            <div class="plugin-section">
+              <div class="plugin-section-head">
+                <h3>内置技能</h3>
+                <span class="plugin-count" id="skills-count"></span>
+              </div>
+              <div class="mem-hint">随应用内置，供 Bot 在单聊中经 Function calling 调用</div>
+              <div id="skills-list" class="skill-grid"></div>
             </div>
-            <div class="mem-hint">勾选启用后，该 Bot 在单聊中可通过 Function calling 调用技能</div>
-            <div id="bot-skills-list"></div>
+
+            <div class="plugin-section">
+              <div class="plugin-section-head">
+                <h3>自制插件</h3>
+                <span class="plugin-count" id="plugins-count"></span>
+              </div>
+              <div class="mem-hint">
+                把事件 POST 到你自己的 Webhook 地址。支持事件：
+                <code>chat.completed</code> / <code>chat.error</code> /
+                <code>session.created</code> / <code>session.deleted</code>
+              </div>
+              <div id="plugins-list" class="plugin-list"></div>
+            </div>
+          </div>
+
+          <div class="plugin-col plugin-col-side">
+            <div class="plugin-section">
+              <div class="plugin-section-head">
+                <h3>Bot 技能</h3>
+                <button id="btn-skill-refresh" class="btn-ghost btn-sm">刷新</button>
+              </div>
+              <div class="plugin-bot-picker">
+                <select id="skill-bot-select"></select>
+              </div>
+              <div class="mem-hint">勾选启用后，该 Bot 在单聊中可通过 Function calling 调用技能</div>
+              <div id="bot-skills-list"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 添加/编辑插件弹窗 -->
+      <div id="modal-plugin" class="modal hidden">
+        <div class="modal-box">
+          <h3 id="plugin-modal-title">添加插件</h3>
+          <div class="modal-section-title">把 Orua 的事件 POST 到你自己的地址</div>
+          <label>插件名称</label>
+          <input id="plugin-name" type="text" maxlength="64" placeholder="例如：我的通知机器人">
+          <label>Webhook 地址</label>
+          <input id="plugin-url" type="text" maxlength="2048" placeholder="https://example.com/orua-hook">
+          <label>订阅事件</label>
+          <div id="plugin-events" class="member-checks"></div>
+          <div id="plugin-form-error" class="form-error hidden"></div>
+          <div class="modal-actions">
+            <button class="btn-ghost" data-close="modal-plugin">取消</button>
+            <button id="btn-plugin-save" class="btn-primary">保存</button>
           </div>
         </div>
       </div>

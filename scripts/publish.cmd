@@ -17,7 +17,12 @@ if errorlevel 1 (
   exit /b 1
 )
 
-rem clean previous output to avoid stale files
+rem Clean previous output to avoid stale files.
+rem NOTE: since v0.5.2 user data lives in %LOCALAPPDATA%\Orua, NOT in dist\Orua\data,
+rem so rebuilding dist\Orua no longer destroys app.db / uploads (avatars) / config.json.
+rem If this machine still has the old layout, migrate it out first to avoid data loss.
+if exist "dist\Orua\data" call :migrate_legacy
+if errorlevel 1 exit /b 1
 if exist "dist\Orua" rmdir /s /q "dist\Orua"
 
 "%DOTNETEXE%" publish src\AiCompanion.App\AiCompanion.App.csproj -c Release -r win-x64 --self-contained false -o dist\Orua
@@ -34,3 +39,16 @@ if errorlevel 1 exit /b 1
 
 echo [OK] Published to dist\Orua. Desktop shortcut created: Orua.lnk
 endlocal
+exit /b 0
+
+:migrate_legacy
+echo [INFO] migrating legacy dist\Orua\data to %LOCALAPPDATA%\Orua ...
+if not exist "%LOCALAPPDATA%\Orua" mkdir "%LOCALAPPDATA%\Orua"
+robocopy "dist\Orua\data" "%LOCALAPPDATA%\Orua" /E /XC /XN /XO /NFL /NDL /NJH /NJS >nul
+rem robocopy exit codes: 0-7 are success, 8+ indicate real failures
+if errorlevel 8 (
+  echo [ERROR] failed to migrate legacy data. Abort to avoid data loss.
+  exit /b 1
+)
+echo [INFO] legacy data migrated.
+exit /b 0

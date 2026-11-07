@@ -154,6 +154,20 @@ node scripts\checks\check-failure-visibility.mjs
 
 另：`backend/src/event_bus.h` 定义事件总线，内置 Webhook 插件可将事件 POST 到外部地址。事件：`chat.completed` / `chat.error` / `session.created` / `session.deleted`。
 
+### 自制插件（v0.5.2 起可在界面添加）
+
+侧栏「插件」页 →「自制插件」区块 →「+ 添加插件」，填名称、Webhook 地址、勾选订阅事件即可，**保存后立即生效**（后端热重载 EventBus，无需重启）。
+
+| 接口 | 说明 |
+|---|---|
+| `GET /api/v1/plugins` | 列出全部插件与可选事件 |
+| `POST /api/v1/plugins` | 新增；**同名视为更新**（「编辑」复用此接口） |
+| `DELETE /api/v1/plugins/{name}` | 按名称删除 |
+
+校验规则：名称非空且 ≤64 字符；URL 必须以 `http://` 或 `https://` 开头且 ≤2048 字符；事件仅接受上面四个（未知事件直接拒绝，避免配了永不触发的订阅）；最多 32 个插件。配置写入 `%LOCALAPPDATA%\Orua\config.json` 的 `plugins` 数组。
+
+> 此前这些配置只能手改 `config.json` 且必须重启后端才生效，UI 上没有任何入口——这就是「无法增加插件」的根因。
+
 ## 打包与更新指引
 
 一条命令完成「构建后端 + 跑 ctest + 发布 WPF 壳 + 部署 backend.exe + 建桌面快捷方式」：
@@ -164,18 +178,25 @@ scripts\publish.cmd
 
 产物在 `dist\Orua\`：`AiCompanion.exe`（启动器/壳）、`backend\backend.exe`、`wwwroot\`。桌面快捷方式 `Orua.lnk` 指向该 exe，工作目录即 `dist\Orua`。
 
-> **更新前必须备份数据。** `publish.cmd` 会先 `rmdir /s /q dist\Orua` 清掉旧产物，**连同 `dist\Orua\data\` 一起删除**——里面有 `app.db` / `app.db-wal` / `app.db-shm`（Bot、群、聊天记录、技能开关、提醒）、`config.json`（含 DPAPI 加密的 API Key）、`uploads\`（图片头像）、`logs\`。不备份就等于清空用户数据。
+> **用户数据不在产物目录（v0.5.2 起）。** 数据固定存放在 `%LOCALAPPDATA%\Orua\`（通常是 `C:\Users\<你>\AppData\Local\Orua`）：
+> `app.db` / `app.db-wal` / `app.db-shm`（Bot、群、聊天记录、技能开关、提醒）、`config.json`（含 DPAPI 加密的 API Key 与插件配置）、`uploads\`（图片头像）、`logs\`。
+>
+> 因此 `publish.cmd` 的 `rmdir /s /q dist\Orua` **不再影响用户数据**，覆盖安装、换版本都不会丢头像或聊天记录。
+>
+> 若本机仍是旧布局（`dist\Orua\data` 存在），`publish.cmd` 会先把它整体搬到 `%LOCALAPPDATA%\Orua` 再删产物；WPF 壳首次启动也会做同样的一次性迁移（目标已存在则跳过）。迁移失败时发布会中止而不是删数据。
 
 更新步骤（同一台机器、同一个 Windows 用户）：
 
 ```cmd
 rem 1) 先退出 Orua（壳退出时会带走它守护的 backend.exe；确认任务管理器里没有残留 backend.exe）
-rem 2) 整目录备份 data（三个 db 文件必须一起拷，WAL 里可能还有未 checkpoint 的数据）
-xcopy /e /i /y dist\Orua\data backups\dist-data-2026-11-07-pre-publish
-rem 3) 发布
+rem 2) 发布（不再需要手工备份/回拷 data）
 scripts\publish.cmd
-rem 4) 想保留原有 Bot / Key / 聊天记录就把 data 拷回去；想要干净起步则跳过这一步
-xcopy /e /i /y backups\dist-data-2026-11-07-pre-publish dist\Orua\data
+```
+
+如需手动备份（换机器、重装系统前）：
+
+```cmd
+xcopy /e /i /y "%LOCALAPPDATA%\Orua" backups\orua-data-2026-11-07
 ```
 
 `backups\` 已在 `.gitignore` 中（内含 data 副本与 DPAPI 密钥文件，切勿提交）。DPAPI 密文绑定当前 Windows 用户，换机器或换用户后旧 Key 解不开，需要重新填。
@@ -187,7 +208,7 @@ curl http://127.0.0.1:8765/health
 powershell -NoProfile -Command "(Get-Item dist\Orua\AiCompanion.exe).VersionInfo | Format-List ProductName,ProductVersion,FileVersion"
 ```
 
-- `/health` 返回 `{"status":"ok","version":"5.0.0"}`；启动器打开后侧栏脚注显示 `v5.0`（boot 时读 `/health` 覆盖，因此脚注反映的是**实际连上的后端**，不是 HTML 里的字面量）
+- `/health` 返回 `{"status":"ok","version":"0.5.2"}`；启动器打开后侧栏脚注显示 `v0.5.2`（boot 时读 `/health` 覆盖，因此脚注反映的是**实际连上的后端**，不是 HTML 里的字面量）
 - exe 的 `ProductVersion` / `FileVersion` 来自 `AiCompanion.App.csproj` 的 `<Version>`
 - 旧库首次启动会自动迁移：`group_messages` 的 `role` CHECK 放开 `system`（失败留痕），原地重建并保留全部历史行，幂等；日志里会出现 `db: group_messages 重建以放开 role='system'`
 
@@ -217,6 +238,21 @@ dotnet publish src\AiCompanion.App -c Release -r win-x64
 4. **Bot 编辑器提交前校验**：`max_tokens` 限 1–65536 整数（留空仍 2048），模型名与设置默认模型双空时拦在提交前并指出去哪儿填；`input` 补 `max` 属性。
 5. **版本三处同源 `4.1.0`**：exe 文件/产品版本、`/health`、侧栏脚注统一；脚注 boot 时读 `/health` 覆盖，反映实际连上的后端产物，避免 UI 与产物各说各话。
 6. **可证伪闸门**：三个 stub 检查脚本（`check-reminders-ui.mjs` 109 条 / `check-bot-skills-ui.mjs` 54 条 / `check-failure-visibility.mjs` 19 条）固化进 `scripts/checks/`，断言必须能被旧代码证伪——修复前副本跑应有 FAIL，修复后全 PASS。
+
+## v0.5.2 变更
+
+> **版本号规则变更**：自 v0.5.2 起全部版本改用 `0.x.y` 语义（此前为 `1`–`5.1`）。脚注改为完整三段显示（`v0.5.2`），不再截断。
+
+1. **头像与数据持久化（修复「更新后头像消失」）**：数据目录从 `dist\Orua\data` 迁到 `%LOCALAPPDATA%\Orua`。此前 `publish.cmd` 会 `rmdir /s /q dist\Orua` 重建产物，把 `app.db`、`uploads\*.png`（头像）、`config.json` 一并删掉——用户每次更新都丢头像。现在数据与产物分离，覆盖安装不再触碰用户数据；首次启动自动从旧位置一次性迁移（含 WAL/SHM 重建）。
+2. **插件 UI 重做**：原布局固定 240px 左栏，把「计算器」「定时提醒」压成断字，且 checkbox 被全局 `input{width:100%}` 撑满整行、技能名挤成「计...」。现改为「主区自适应 + 280px 侧栏」两列，技能卡片紧凑网格（描述限 2 行），标题栏按钮右对齐。
+3. **修复无法添加插件**：`config.json` 里一直有 `plugins` 数组，但**没有任何接口能读写它**——用户想加自制插件只能手改 JSON 并重启。新增 `GET/POST/DELETE /api/v1/plugins`：
+   - 同名 POST 视为更新（「编辑」复用同一接口）
+   - 校验：名称非空且 ≤64 字符、URL 必须 `http(s)://`、事件限定在 `chat.completed` / `chat.error` / `session.created` / `session.deleted`、上限 32 个插件
+   - 每次写操作回写 `config.json` 并**热重载 EventBus**，无需重启后端
+   - 前端新增「+ 添加插件」按钮与弹窗（名称 / Webhook 地址 / 事件多选），列表支持编辑与删除
+4. **头像缺失不再破图**：`<img>` 加 `onerror` 回退 emoji 占位，并附 `?v=avatar_path` 缓存破坏参数（换头像后立即生效）。消除此前控制台的 `ERR_BLOCKED_BY_ORB` 噪音。
+5. **`publish.cmd` 数据安全**：迁移逻辑抽为独立子程序（cmd 的 `rem` 遇全角括号会解析失败），robocopy 失败时中止发布而非删数据。
+6. **新增 `scripts\smoke_plugins.mjs`**：真实 GUI 里点「添加插件」→ 填表 → 保存 → 校验拦截 → 删除的完整链路断言，并把布局（标题不断行、区块可见）纳入检查。
 
 ## v5.1 变更
 
@@ -314,3 +350,15 @@ dotnet publish src\AiCompanion.App -c Release -r win-x64
 5. `dist\Orua\AiCompanion.exe` 文件版本为 `5.1.0.0`、产品名 `Orua`；`/health` 返回 `5.1.0`；侧栏脚注显示 `v5.1`
 6. `smoke_gui.mjs` 支持 `CDP_PORT` 环境变量
 7. v1–v5.0 功能与自动化测试全绿（ctest 91 用例 / 777 断言、三个 stub 闸门 109/54/19、`test_api.ps1`）
+
+### v0.5.2
+
+1. 数据目录为 `%LOCALAPPDATA%\Orua`，`dist\Orua` 内不含用户数据；旧布局首次启动自动一次性迁移（WAL/SHM 重建），`publish.cmd` 覆盖安装不再删除 `app.db` / `uploads`（头像）/ `config.json`
+2. 头像持久化：上传后重启应用仍显示；`<img>` 缺失时回退 emoji 占位，控制台无 `ERR_BLOCKED_BY_ORB` 破图噪音；换头像因 `?v=avatar_path` 立即生效
+3. 插件页布局：标题与「+ 添加插件」按钮同行右对齐；技能卡片两列网格、标题单行不折断；「自制插件」区块在首屏可见（`smoke_plugins.mjs` 断言）
+4. 可添加自制插件：UI 填表 → 保存 → 列表出现 → 重启后仍在（`smoke_plugins.mjs` 真实点击 + 后端持久化测试覆盖）
+5. 插件校验：空名称 / 非 http(s) URL / 未知事件 / 超过 32 个 均被拒绝并给出中文提示；同名 POST 走更新而非重复新增
+6. 插件热重载：新增/删除后日志出现新的 `plugins loaded: N`，无需重启后端
+7. 删除插件后列表与 `config.json` 同步移除
+8. 版本号三处同源 `0.5.2`：exe 文件版本 `0.5.2.0`、`/health` 返回 `0.5.2`、侧栏脚注完整显示 `v0.5.2`（不再截断成 `v0.5`）
+9. v1–v5.1 功能与自动化测试全绿（ctest 95 用例 / 793 断言、三个 stub 闸门 109/54/19、`test_api.ps1`、`smoke_gui.mjs`、`smoke_plugins.mjs`）

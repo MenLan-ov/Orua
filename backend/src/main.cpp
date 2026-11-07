@@ -37,7 +37,7 @@ int main(int argc, char** argv) {
   for (int port = sc.port; port <= sc.port + 10; ++port) {
     logx::info("trying to listen on " + sc.host + ":" + std::to_string(port));
     httplib::Server svr;
-    srv::registerRoutes(svr, sc.static_dir, sc.auth_token);
+    srv::registerRoutes(svr, sc.static_dir, sc.auth_token, cfgPath);
     if (svr.bind_to_port(sc.host, port)) {
       sc.actual_port = port;
       cfg::save(cfgPath, sc);

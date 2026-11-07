@@ -26,9 +26,59 @@ public partial class MainWindow : Window
     private static string BackendExe =>
         Environment.GetEnvironmentVariable("AI_COMPANION_BACKEND")
         ?? Path.Combine(AppContext.BaseDirectory, "backend", "backend.exe");
-    private static string DataDir =>
-        Environment.GetEnvironmentVariable("AI_COMPANION_DATA")
-        ?? Path.Combine(AppContext.BaseDirectory, "data");
+
+    /// <summary>
+    /// 数据目录固定到 %LOCALAPPDATA%\Orua，不再放在安装目录下的 data\。
+    /// 原因：升级时 publish.cmd 会整目录重建 dist\Orua，原先 data\ 就在里面，
+    /// 于是 app.db、上传的头像（uploads\*.png）、config.json 会被一并删掉——
+    /// 用户表现为「更新后头像全没了」。数据与产物分离后，覆盖安装不再碰用户数据。
+    /// </summary>
+    private static string DataDir
+    {
+        get
+        {
+            var overridden = Environment.GetEnvironmentVariable("AI_COMPANION_DATA");
+            if (!string.IsNullOrWhiteSpace(overridden)) return overridden;
+
+            var roaming = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Orua");
+            MigrateLegacyDataIfNeeded(roaming);
+            return roaming;
+        }
+    }
+
+    /// <summary>
+    /// 一次性把旧版「安装目录\data」搬到新位置。只在目标尚不存在时执行，
+    /// 因此重复启动、跨版本升级都不会覆盖新数据；搬迁失败不阻塞启动（退回旧目录）。
+    /// </summary>
+    private static void MigrateLegacyDataIfNeeded(string target)
+    {
+        try
+        {
+            var legacy = Path.Combine(AppContext.BaseDirectory, "data");
+            if (!Directory.Exists(legacy)) return;
+            if (Directory.Exists(target) && Directory.EnumerateFileSystemEntries(target).Any()) return;
+
+            Directory.CreateDirectory(target);
+            foreach (var dir in Directory.GetDirectories(legacy, "*", SearchOption.AllDirectories))
+                Directory.CreateDirectory(Path.Combine(target, Path.GetRelativePath(legacy, dir)));
+            foreach (var file in Directory.GetFiles(legacy, "*", SearchOption.AllDirectories))
+                File.Copy(file, Path.Combine(target, Path.GetRelativePath(legacy, file)), overwrite: false);
+
+            // 旧库的 WAL/SHM 是运行期文件，直接拷贝可能不一致，让 SQLite 在新位置重建
+            foreach (var sidecar in new[] { "app.db-wal", "app.db-shm" })
+            {
+                var p = Path.Combine(target, sidecar);
+                if (File.Exists(p)) File.Delete(p);
+            }
+
+            System.Diagnostics.Debug.WriteLine($"[Orua] data migrated: {legacy} -> {target}");
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[Orua] data migration failed (fallback to install dir): {ex.Message}");
+        }
+    }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {

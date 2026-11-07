@@ -442,11 +442,77 @@ label.chk input { width: auto; }
 .ctx-mini-btn.danger { color: var(--danger, #ef4444); }
 .ctx-mini-btn.danger:hover { background: rgba(239, 68, 68, .14); }
 
-/* ============ 插件视图（技能库 / Bot 技能开关） ============ */
-.skill-card { background: var(--bg-panel, #1e293b); border: 1px solid var(--border, #334155);
-              border-radius: 10px; padding: 12px; margin-bottom: 10px; }
-.skill-card h4 { margin: 0 0 4px; font-size: 14px; }
-.skill-card p { margin: 0; font-size: 12px; color: var(--text-dim, #94a3b8); }
+/* ============ 插件视图（内置技能 / 自制插件 / Bot 技能开关） ============ */
+
+/* 视图标题栏：标题在左，操作按钮靠右。此前 .view-header 没有任何样式，
+   加了按钮后会掉到标题下面，看起来像错位。 */
+#view-plugins { padding: 18px 20px 16px; box-sizing: border-box; }
+.view-header { display: flex; align-items: center; justify-content: space-between;
+               gap: 12px; margin-bottom: 12px; flex-shrink: 0; }
+.view-header h2 { margin: 0; }
+
+/* 布局：主区（内置技能 + 自制插件）自适应，右侧固定放 Bot 技能开关。
+   侧栏 280px 是实测下限：再宽会把主区压到 400px 以下，技能网格只能排一列。 */
+.plugin-layout { display: grid; grid-template-columns: minmax(0, 1fr) 280px;
+                 gap: 16px; flex: 1; min-height: 0; align-items: stretch; }
+.plugin-col { display: flex; flex-direction: column; gap: 16px; min-width: 0;
+              min-height: 0; overflow-y: auto; padding-right: 4px; }
+.plugin-section { background: var(--bg-panel, #1e293b); border: 1px solid var(--border, #334155);
+                  border-radius: 12px; padding: 14px 16px; }
+.plugin-section-head { display: flex; align-items: center; justify-content: space-between;
+                       gap: 10px; margin-bottom: 6px; }
+.plugin-section-head h3 { margin: 0; font-size: 14px; white-space: nowrap; }
+.plugin-count { font-size: 12px; color: var(--text-dim, #94a3b8); white-space: nowrap; }
+
+/* 技能卡片：紧凑网格。原来每张卡是整块大卡片，6 张就把主区占满，
+   把下面的「自制插件」挤到视口外。现在限制描述行数并缩小间距，
+   两块内容可以同屏看到。 */
+.skill-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+              gap: 8px; margin-top: 10px; }
+.skill-card { background: var(--bg, #0f172a); border: 1px solid var(--border, #334155);
+              border-radius: 10px; padding: 10px 12px; margin: 0; min-width: 0; }
+.skill-card h4 { margin: 0 0 3px; font-size: 13px; white-space: nowrap;
+                 overflow: hidden; text-overflow: ellipsis; }
+.skill-card p { margin: 0; font-size: 11.5px; line-height: 1.45;
+                color: var(--text-dim, #94a3b8);
+                display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+                overflow: hidden; }
+
+/* 自制插件行：名称 + 地址 + 事件标签 + 操作按钮 */
+.plugin-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.plugin-row { display: flex; align-items: flex-start; gap: 10px;
+              background: var(--bg, #0f172a); border: 1px solid var(--border, #334155);
+              border-radius: 10px; padding: 10px 12px; }
+.plugin-row-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.plugin-row-name { font-size: 13px; font-weight: 600; white-space: nowrap;
+                   overflow: hidden; text-overflow: ellipsis; }
+.plugin-row-url { font-size: 12px; color: var(--text-dim, #94a3b8); white-space: nowrap;
+                  overflow: hidden; text-overflow: ellipsis; }
+.plugin-row-events { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.plugin-event-tag { font-size: 11px; padding: 1px 7px; border-radius: 999px;
+                    background: rgba(59, 130, 246, .15); color: var(--accent, #3b82f6);
+                    white-space: nowrap; }
+.plugin-row-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.plugin-empty { font-size: 12px; color: var(--text-dim, #94a3b8);
+                padding: 14px 0; text-align: center; }
+
+.plugin-bot-picker { margin-top: 8px; }
+.plugin-bot-picker select { width: 100%; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+.form-error { margin-top: 10px; padding: 8px 10px; border-radius: 8px; font-size: 12px;
+              background: rgba(239, 68, 68, .12); color: var(--danger, #ef4444); }
+
 .bot-skill-row { display: flex; align-items: center; justify-content: space-between;
                  padding: 10px 12px; border-radius: 8px;
-                 background: var(--bg-panel, #1e293b); margin-bottom: 8px; }
+                 background: var(--bg, #0f172a); margin-bottom: 8px; gap: 10px; }
+.bot-skill-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+                      white-space: nowrap; }
+/* 全局 input{width:100%} 会把勾选框也撑满整行，把技能名挤成「计...」；
+   这里显式收回复选框宽度，让名称占满剩余空间。 */
+.bot-skill-row input[type="checkbox"] { width: auto; flex: 0 0 auto; margin: 0; }
+
+/* 窄窗口下侧栏落到下方，避免两列都挤成细条 */
+@media (max-width: 980px) {
+  .plugin-layout { grid-template-columns: 1fr; }
+  .plugin-col { max-height: none; }
+}

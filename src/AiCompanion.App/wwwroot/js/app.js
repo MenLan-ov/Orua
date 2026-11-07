@@ -11,8 +11,15 @@ function authHeaders(extra = {}) {
   return h;
 }
 
+// 头像渲染：有上传图片就显示图片，否则用 emoji。
+// 图片可能因历史原因缺失（旧版升级会删掉 data\uploads），此时 onerror 就地换成 emoji 占位，
+// 避免列表里出现破图与浏览器控制台的 ERR_BLOCKED_BY_ORB 噪音。
 function botAvatarHtml(b, cls = 'avatar-img') {
-  if (b && b.avatar_url) return `<img class="${cls}" src="${API_BASE}/api/v1/bots/${b.id}/avatar">`;
+  if (b && b.avatar_url) {
+    const emoji = escapeHtml(b.avatar || '🤖');
+    return `<img class="${cls}" src="${API_BASE}/api/v1/bots/${b.id}/avatar?v=${encodeURIComponent(b.avatar_url)}" ` +
+      `onerror="this.outerHTML='<span class=&quot;${cls}&quot;>${emoji}</span>'">`;
+  }
   return `<span class="${cls}">${escapeHtml(b?.avatar || '🤖')}</span>`;
 }
 
@@ -205,6 +212,9 @@ const App = {
     skills: [],
     botSkills: {},
     pluginBotId: null,
+    plugins: [],
+    pluginEvents: [],
+    editingPlugin: null,
     detached: false,
     detachedTarget: null,
   },
@@ -270,6 +280,7 @@ async function switchView(view) {
     if (!App.state.pluginBotId && App.state.bots.length) App.state.pluginBotId = App.state.bots[0].id;
     try {
       await loadSkills();
+      await loadPlugins();
       if (App.state.pluginBotId) await loadBotSkills(App.state.pluginBotId);
     } catch (e) {
       toast(e.message || '技能加载失败');
@@ -764,7 +775,7 @@ App.registerCommand('open-bot-editor', async (b) => {
   App.state.botAvatarRemove = false;
   const prev = $('be-avatar-preview');
   prev.classList.toggle('hidden', !(b?.avatar_url));
-  if (b?.avatar_url) $('be-avatar-img').src = `${API_BASE}/api/v1/bots/${b.id}/avatar`;
+  if (b?.avatar_url) $('be-avatar-img').src = `${API_BASE}/api/v1/bots/${b.id}/avatar?v=${encodeURIComponent(b.avatar_url)}`;
   $('be-api-base').value = b?.api_base_url || '';
   $('be-api-key').value = '';
   $('be-api-key').placeholder = b?.api_key ? `当前 Key：${b.api_key}（留空保持不变）` : '留空 = 使用默认 Key';
@@ -903,7 +914,8 @@ function addGroupBubble(botId, name, avatar, text, opts = {}) {
   bubble.className = 'gmsg' + (botId === 0 ? ' gmsg-user' : '');
   if (opts.id) bubble.dataset.gmsgId = opts.id;
   const av = opts.avatarUrl
-    ? `<img class="avatar-img" src="${API_BASE}/api/v1/bots/${botId}/avatar">`
+    ? `<img class="avatar-img" src="${API_BASE}/api/v1/bots/${botId}/avatar?v=${encodeURIComponent(opts.avatarUrl)}" ` +
+      `onerror="this.outerHTML='<span class=&quot;gmsg-avatar&quot;>${escapeHtml(avatar)}</span>'">`
     : `<span class="gmsg-avatar">${escapeHtml(avatar)}</span>`;
   bubble.innerHTML = `
     <div class="gmsg-head">${av}
@@ -1506,6 +1518,122 @@ function renderSkillCards() {
     card.innerHTML = `<h4>${escapeHtml(s.name)}</h4><p>${escapeHtml(s.description)}</p>`;
     el.appendChild(card);
   }
+  const cnt = $('skills-count');
+  if (cnt) cnt.textContent = `${App.state.skills.length} 个`;
+}
+
+/* ================= 自制插件（Webhook） ================= */
+async function loadPlugins() {
+  const res = await App.api.get('/api/v1/plugins');
+  App.state.plugins = res.plugins || [];
+  App.state.pluginEvents = res.available_events || [];
+  renderPlugins();
+}
+function renderPlugins() {
+  const el = $('plugins-list');
+  if (!el) return;
+  el.innerHTML = '';
+  const cnt = $('plugins-count');
+  if (cnt) cnt.textContent = `${App.state.plugins.length} 个`;
+
+  if (!App.state.plugins.length) {
+    el.innerHTML = '<div class="plugin-empty">还没有自制插件。点右上角「+ 添加插件」，' +
+      '填一个 Webhook 地址即可接入。</div>';
+    return;
+  }
+
+  for (const p of App.state.plugins) {
+    const row = document.createElement('div');
+    row.className = 'plugin-row';
+    const events = (p.events || []).length
+      ? p.events.map((e) => `<span class="plugin-event-tag">${escapeHtml(e)}</span>`).join('')
+      : '<span class="plugin-event-tag">未订阅事件</span>';
+    row.innerHTML = `<div class="plugin-row-main">
+        <div class="plugin-row-name">${escapeHtml(p.name)}</div>
+        <div class="plugin-row-url" title="${escapeHtml(p.url)}">${escapeHtml(p.url)}</div>
+        <div class="plugin-row-events">${events}</div>
+      </div>
+      <div class="plugin-row-actions">
+        <button class="btn-ghost btn-sm" data-plugin-edit="${escapeHtml(p.name)}">编辑</button>
+        <button class="btn-ghost btn-sm" data-plugin-del="${escapeHtml(p.name)}">删除</button>
+      </div>`;
+    el.appendChild(row);
+  }
+
+  el.querySelectorAll('[data-plugin-edit]').forEach((b) =>
+    b.addEventListener('click', () => openPluginModal(b.dataset.pluginEdit)));
+  el.querySelectorAll('[data-plugin-del]').forEach((b) =>
+    b.addEventListener('click', () => deletePlugin(b.dataset.pluginDel)));
+}
+
+function openPluginModal(name) {
+  const editing = name ? App.state.plugins.find((p) => p.name === name) : null;
+  App.state.editingPlugin = editing ? editing.name : null;
+  $('plugin-modal-title').textContent = editing ? '编辑插件' : '添加插件';
+  $('plugin-name').value = editing ? editing.name : '';
+  $('plugin-url').value = editing ? editing.url : '';
+  $('plugin-form-error').classList.add('hidden');
+
+  // 事件多选：首次打开时按后端返回的 available_events 生成，之后复用节点避免丢勾选
+  const evEl = $('plugin-events');
+  const events = App.state.pluginEvents.length
+    ? App.state.pluginEvents
+    : ['chat.completed', 'chat.error', 'session.created', 'session.deleted'];
+  const selected = new Set(editing ? editing.events || [] : ['chat.completed']);
+  evEl.innerHTML = '';
+  for (const ev of events) {
+    const lab = document.createElement('label');
+    lab.className = 'member-check';
+    lab.innerHTML = `<input type="checkbox" data-event="${escapeHtml(ev)}"
+      ${selected.has(ev) ? 'checked' : ''}> ${escapeHtml(ev)}`;
+    evEl.appendChild(lab);
+  }
+  $('modal-plugin').classList.remove('hidden');
+  $('plugin-name').focus();
+}
+
+async function savePlugin() {
+  const name = $('plugin-name').value.trim();
+  const url = $('plugin-url').value.trim();
+  const events = [...$('plugin-events').querySelectorAll('input:checked')]
+    .map((c) => c.dataset.event);
+  const errEl = $('plugin-form-error');
+
+  // 前端先做一遍同样的校验，省一次往返；后端仍有权威校验
+  let err = '';
+  if (!name) err = '插件名称不能为空';
+  else if (!/^https?:\/\/.+/.test(url)) err = 'Webhook 地址必须以 http:// 或 https:// 开头';
+  if (err) {
+    errEl.textContent = err;
+    errEl.classList.remove('hidden');
+    return;
+  }
+  errEl.classList.add('hidden');
+
+  const btn = $('btn-plugin-save');
+  btn.disabled = true;
+  try {
+    await App.api.post('/api/v1/plugins', { name, url, events });
+    $('modal-plugin').classList.add('hidden');
+    toast('插件已保存');
+    await loadPlugins();
+  } catch (e) {
+    errEl.textContent = e.message || '保存失败';
+    errEl.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function deletePlugin(name) {
+  if (!confirm(`确定删除插件「${name}」？`)) return;
+  try {
+    await App.api.del(`/api/v1/plugins/${encodeURIComponent(name)}`);
+    toast('插件已删除');
+    await loadPlugins();
+  } catch (e) {
+    toast(e.message || '删除失败');
+  }
 }
 async function loadBotSkills(botId) {
   botSkillsLoaded.delete(botId);
@@ -1735,7 +1863,9 @@ App.registerCommand('boot', async () => {
   // HTML 里的字面量只是 boot 前兜底。/health 不带 code 信封，故不走 App.api。
   try {
     const h = await (await fetch(`${API_BASE}/health`)).json();
-    if (h && h.version) $('foot-version').textContent = 'v' + String(h.version).split('.').slice(0, 2).join('.');
+    // 版本号全部三段展示（v0.5.2）。旧版这里 slice(0,2) 是给 5.1.0 用的，
+    // 会把 0.5.2 截成 v0.5，看起来像没升级。
+    if (h && h.version) $('foot-version').textContent = 'v' + String(h.version);
   } catch (_) {}
   try {
     App.state.config = await App.api.get('/api/v1/config');
@@ -1866,11 +1996,31 @@ $('skill-bot-select').addEventListener('change', async (e) => {
 $('btn-skill-refresh').addEventListener('click', async () => {
   try {
     await loadSkills();
+    await loadPlugins();
     if (App.state.pluginBotId) await loadBotSkills(App.state.pluginBotId);
   } catch (e) {
     toast(e.message || '技能加载失败');
   }
 });
+
+/* ---- 自制插件弹窗 ---- */
+$('btn-plugin-add').addEventListener('click', () => openPluginModal(null));
+$('btn-plugin-save').addEventListener('click', savePlugin);
+// 通用关闭：任何带 data-close 的按钮隐藏指定弹窗
+document.addEventListener('click', (e) => {
+  const closer = e.target.closest('[data-close]');
+  if (closer) $(closer.dataset.close).classList.add('hidden');
+});
+// 点遮罩空白处关闭（.modal 自身即遮罩层）
+for (const m of document.querySelectorAll('.modal')) {
+  m.addEventListener('mousedown', (e) => { if (e.target === m) m.classList.add('hidden'); });
+}
+// 弹窗内回车直接保存；名称框里回车不应触发表单默认行为
+for (const id of ['plugin-name', 'plugin-url']) {
+  $(id).addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); savePlugin(); }
+  });
+}
 $('btn-memory-cancel').addEventListener('click', () => $('modal-memory').classList.add('hidden'));
 $('btn-memory-save').addEventListener('click', async () => {
   if (!editingMemoryId) return;
