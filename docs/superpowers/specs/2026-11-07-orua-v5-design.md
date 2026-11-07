@@ -1,0 +1,185 @@
+# Orua v5 设计规格：本地安全边界收敛与稳定性
+
+> 本规格在 v4.1（2026-11-06-orua-v4.1-design.md）之上增量演进，v1–v4.1 全部功能与测试保持有效。
+> v5 是**安全与稳定性版本**：不新增用户可见功能，专注于封死本地攻击面、收敛参数边界、消除资源无界增长。
+
+## 1. 目标
+
+1. **封死本地 API 的跨域滥用**：后端只监听 `127.0.0.1`，但任何本机浏览器页面（含恶意网页）都能向 `http://127.0.0.1:8765` 发请求。v5 引入**每次启动随机生成的本地令牌**，并对浏览器来源的请求强制校验。
+2. **封死 DNS Rebinding**：`http_get` 技能原先只在 hostname 层面拒绝内网段，攻击者可用「先解析到公网、再切回内网」的域名绕过。v5 在解析后对**每个真实 IP** 复检。
+3. **收敛 `file_read` 的读取范围**：原实现可读任意本地文本文件，配合提示注入可外泄任意文件内容。v5 引入目录白名单。
+4. **收敛服务端参数边界**：`max_tokens` / `temperature` / `keep_rounds` / `proxy_port` 原先只在部分路径校验，绕过前端即可写入越界值。v5 在服务端统一收窄。
+5. **消除 Webhook 分派的无界线程增长**：`event_bus` 原实现每次 `emit` 起一个 detached 线程，突发 emit 会 scale 出无界线程。v5 改为有界分派。
+6. **版本号统一 5.0.0**。
+
+## 2. 总体架构（变更点）
+
+| 层 | 变更 |
+|---|---|
+| 后端 | 新增 header-only `validation.h`（clamp + 随机令牌）；`server.cpp` 前置路由加令牌校验与 CORS 头；`skills.cpp` 加 `resolveAndRecheck` / `fileReadAllowed`；`event_bus` 改有界分派；`config` 加 `auth_token` 字段 |
+| WPF | 读 `config.json` 的 `server.auth_token`，注入 `window.__ORUA_TOKEN__`；后端重启（含端口回退）时重推 `auth-token` 消息 |
+| 前端 | 模块级 `__ORUA_TOKEN` + `authHeaders()` 助手，所有 `/api/v1/*` 请求回传 `X-Orua-Token` |
+| 测试 | 新增 `test_v5.cpp`（clamp / 令牌 / 白名单 / SSRF 用例）；`test_config.cpp` 补 `auth_token` 往返 |
+
+## 3. 本地 API 令牌
+
+### 3.1 生成与持久化
+
+- `val::randomToken()`：32 字节随机熵 → URL-safe base64 无填充 → **43 字符**。
+- `main.cpp` 在 `cfg::load` 之后生成新令牌并写入 `ServerConfig::auth_token`；`cfg::save` 在绑定成功后落盘（连同 `actual_port`）。
+- **每次启动都是新令牌**——不跨启动复用，降低泄漏后的可利用窗口。
+
+### 3.2 校验规则（关键设计）
+
+```cpp
+bool apiPath    = path.rfind("/api/v1/", 0) == 0;
+bool avatarGet  = path.size() >= 7 && path.compare(path.size() - 7, 7, "/avatar") == 0;
+if (!origin.empty() && apiPath && !authToken.empty() && !avatarGet &&
+    req.get_header_value("X-Orua-Token") != authToken) {
+  // 403
+}
+```
+
+四个条件**同时**满足才拦截：
+
+| 条件 | 原因 |
+|---|---|
+| `!origin.empty()` | 无 `Origin` 的是本机直连（`curl` / `test_api.ps1` / 后端自身），不校验 |
+| `apiPath` | 只保护 `/api/v1/*`；静态资源与 `/health` 不校验 |
+| `!authToken.empty()` | 令牌未启用（旧配置）时降级为匿名，保证兼容 |
+| `!avatarGet` | 头像由 `<img>` 直接加载，**无法携带自定义头** → 必须豁免 |
+
+- **豁免清单**：`/health`、任意以 `/avatar` 结尾的 `/api/v1/*`、所有非 `/api/v1/*` 路径。
+- CORS 响应头加 `Access-Control-Allow-Headers: Content-Type, X-Orua-Token`，否则浏览器的预检会挡掉自定义头。
+
+### 3.3 令牌在进程间的传递
+
+```
+main.cpp 生成 → cfg::save 写 config.json
+                    ↓
+        WPF BackendProcess.StartAsync() 等 /health up
+                    ↓
+   MainWindow.InitWebViewAsync() 读 config.json → 注入 window.__ORUA_TOKEN__
+                    ↓
+        app.js 模块级 __ORUA_TOKEN → authHeaders()
+```
+
+- **顺序关键**：`InitWebViewAsync` 必须在 `BackendProcess.StartAsync()` 之后（后者已等到 `/health` up，即 `cfg::save` 已完成）。
+- **端口回退场景**：后端可能从 8765 回退到 8766–8775，令牌随之重新生成。WPF 在 `StatusChanged == "up"` 时**重新读** `config.json` 并 `PostToJs({type:'auth-token', payload:{token}})`。
+- **独立窗口**：`ChatWindow` 通过 `MainWindow.ReadAuthToken()` 读同一份令牌注入；`PostToJs` 会转发到 `_detached` 窗口集合，因此主窗口收到的 `auth-token` 也能抵达独立窗口。
+
+## 4. `http_get` 的 DNS-Rebinding 防护
+
+### 4.1 攻击模型
+
+```
+1. 攻击者注册 evil.example，DNS 先返回公网 IP（通过 isBlockedHost 的 hostname 检查）
+2. 后端发起连接前，DNS 改指向 127.0.0.1 / 192.168.x.x
+3. 后端连到内网服务，把响应正文返回给攻击者
+```
+
+### 4.2 防护
+
+`execHttpGet` 在 `isBlockedHost(host)` 通过后，追加 `resolveAndRecheck(host)`：
+
+```
+getaddrinfo(host)
+  → 对每个解析结果（AF_INET / AF_INET6）用 inet_ntop 转文本
+  → 逐个再喂给 isBlockedHost
+  → 任一命中内网/回环 → 整体拒绝
+  → 解析失败 → 放行（连接稍后自然会失败，不误伤离线环境）
+```
+
+- `isBlockedIpv6` 增强：补 `fe80::/10`（链路本地）、`fc00::/7`（唯一本地）、`fec0::/10`（站点本地）。
+- 重定向仍禁用（v4 既定），避免 302 跳到内网。
+
+## 5. `file_read` 目录白名单
+
+### 5.1 允许的根目录
+
+| 来源 | 说明 |
+|---|---|
+| `db::dataDir()` | 应用数据目录（Bot 上传、导出等） |
+| OS `temp_directory_path()` | 系统临时目录 |
+| settings 键 `file_read_allowlist` | 分号分隔的绝对根目录，用户显式追加 |
+
+### 5.2 判定逻辑
+
+```
+输入路径 → fs::u8path（按 UTF-8 构造，避免窄字节→ANSI 抛异常）
+        → 绝对化 + lexically_normal
+        → 与每个允许根做「前缀 + 路径分隔符」比较
+        → 命中任一 → 允许；否则拒绝
+```
+
+- **`fs::u8path` 是必需的**：Windows 上 `fs::path(std::string)` 会按 ANSI 代码页转换，中文路径直接抛 `No mapping for the Unicode character exists in the target multi-byte code page`。这条在 ctest 上真实炸过。
+- `..` 归一化在比较前完成，防止 `data/../../Windows/...` 逃逸。
+- 8KB 硬截断不变（按字节切，可能截断多字节字符，回填时按替换策略序列化）。
+
+## 6. 服务端参数收窄
+
+`backend/src/validation.h`（header-only，供 `backend` 与 `backend_tests` 共用）：
+
+| 函数 | 范围 | 应用位置 |
+|---|---|---|
+| `clampMaxTokens(int64_t) → int` | `[1, 65536]` | bot POST / PATCH |
+| `clampTemperature(double) → double` | `[0, 2]` | bot POST / PATCH |
+| `clampKeepRounds(int64_t) → int` | `[0, 100]` | config POST |
+| `clampProxyPort(int64_t) → int` | `[0, 65535]` | config POST |
+
+- 取值为 `int64_t`（`.get<int64_t>()`）而非 `int`，避免超大 JSON 数字在 `get<int>()` 处抛 `type_error` 而非被收窄。
+- **为什么放 header**：`server.cpp` 只编进 `backend`，`backend_tests` 不链它；header-only 让两边都能直接测 clamp 逻辑。
+
+## 7. `event_bus` Webhook 有界分派
+
+| 参数 | 值 | 语义 |
+|---|---|---|
+| `kMaxInflight` | 8 | 同时进行的 webhook 请求上限 |
+| `kMaxQueue` | 256 | 等待队列上限；溢出**丢弃最新**（drop-newest） |
+
+- 单实例状态：`wm_`（互斥）、`inflight_`、`queued_`、`pending_`。
+- 每个 job 仍是 detached `std::thread`，但**受 `inflight_` 计数约束**，不会无界增长。
+- httplib Client 2s 超时，避免慢 webhook 长期占用 slot。
+- **不回归的既有约束**：单次 `emit` 的送达延迟仍 ≤400ms（`test_event_bus` 断言）。
+
+## 8. 测试策略
+
+### 8.1 `backend/tests/test_v5.cpp`（新增）
+
+| 组 | 覆盖 |
+|---|---|
+| clamp | 四个 clamp 的边界值与越界值 |
+| 令牌 | 唯一性（多次生成不重复）、长度 43、URL-safe 字符集 |
+| 白名单 | 临时目录下文件允许；`C:\Windows\System32\drivers\etc\hosts` 拒绝 |
+| SSRF | IP 字面量、主机名、十进制/十六进制简写、`::1`、`fe80::` 前缀 |
+
+### 8.2 既有测试
+
+- `test_config.cpp` 补 `auth_token` 往返（`"tok_abc123-_"`）。
+- `test_skills_exec.cpp` 的 file_read 用例改用 `path.u8string()` 传参（UTF-8），避免非 ASCII 临时目录炸掉。
+- `test_event_bus.cpp` 保持绿（有界分派不改变单次 emit 时延契约）。
+
+### 8.3 集成与实机
+
+- `test_api.ps1` 全绿：**无 `Origin` → 不校验令牌**，脚本零改动即通过。
+- 令牌矩阵实测：无 Origin 放行 / evil-origin 403 / 正确令牌放行 / 错误令牌 403 / 头像豁免。
+- 收窄实测：`temperature 9→2`、`max_tokens 999999→65536`、`keep_rounds 999→100`、`proxy_port 99999→65535`。
+- **实机 GUI 冒烟**（`scripts/smoke_gui.mjs`）：经 WebView2 CDP 连进真实窗口，读 `__ORUA_TOKEN` 长度、验证前端带令牌跨域调 `/api/v1/bots` 得 200、错误令牌得 403。
+
+## 9. 明确排除项
+
+- 多用户 / 远程访问（仍是单机单用户应用）。
+- 令牌轮换机制（每次启动即新令牌，已足够）。
+- 对非浏览器来源的强鉴权（本机直连仍匿名，保证开发与脚本可用）。
+- `file_read` 的内容级脱敏（仅做路径白名单）。
+- 群聊中的技能调用（v4 既定排除，v5 不动）。
+
+## 10. 验收标准
+
+1. `file_read` 仅允许 data 目录 / 系统临时目录 / `file_read_allowlist` 白名单，越界路径拒绝（ctest 覆盖）。
+2. 后端每启动生成随机令牌；前端经 WPF 注入后对 `/api/v1/*` 请求回传 `X-Orua-Token`；带跨域 `Origin` 且令牌已启用时校验，无 `Origin` 直连不受影响（`test_api.ps1` 全绿）。
+3. `http_get` 主机名解析后逐 IP 复检（DNS-Rebinding），不跟随重定向，SSRF 约束不回归（ctest 覆盖）。
+4. `max_tokens` / `temperature` / `keep_rounds` / `proxy_port` 服务端收窄（ctest 覆盖）。
+5. `event_bus` Webhook 有界分派（并发 ≤8、队列 ≤256），单次 `emit` 仍 ≤400ms 送达（ctest 覆盖）。
+6. 实机 GUI 冒烟：前端令牌已注入且跨域请求成功、错误令牌 403。
+7. v1–v4.1 功能与自动化测试全绿；版本号三处 5.0.0。

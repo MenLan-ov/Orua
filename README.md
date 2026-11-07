@@ -207,6 +207,17 @@ dotnet publish src\AiCompanion.App -c Release -r win-x64
 - **提醒只在应用运行期间提示**：无系统通知、无开机自启调度；应用关闭期间到期的提醒会在下次启动后按每 15s 一条逐轮提示（每轮至多一条，其余排队）。toast 是单元素提示位且 2.2s 自动隐藏，因此 N 条到期需 N×15s 才提示完，每条只有约 2.2s 可见窗，错过的内容没有回看入口（提醒仍会落库，`GET /api/v1/reminders` 可查）。
 - **群聊不启用技能**：Function calling 工具循环（≤3 轮）只在单聊生效，群聊发言不调用技能。
 
+## v4.1 变更
+
+> v4.1 不是新功能版本，而是 **v4 终验后的缺陷收口版本**：把「验证通过但用户看不见」与「失败被静默吞掉」两类问题从根上修掉。设计规格见 `docs/superpowers/specs/2026-11-06-orua-v4.1-design.md`。
+
+1. **失败必须可见**：单聊失败记入 `App.state.chatFailure`，`loadMessages` 重载后按会话重画错误气泡，清疤只在「开始新一次生成」；群聊失败原因与自动暂停原因以 `role=system`、`bot_id=NULL` 落库，重开房间可见，且不占「最近 12 条」上下文、不进记忆提取快照。
+2. **`group_messages` 放开 `role='system'`**：`CHECK` 约束不能 `ALTER`，故加一次性原地重建迁移（`PRAGMA foreign_keys=OFF` → 改名 → 新 DDL 建表 → 显式列名整行搬回 → 删旧表），幂等且数据零丢失；DDL 抽成 `kGroupMessagesDdl` 常量供建库与迁移共用。
+3. **假闭合清零**：到期提醒改为「一个 tick 只允许一次 `toast()`」，取 `due_at` 升序最早一条呈现，其余条数并成「（另有 N 条待提醒）」后缀，**该条真落地才记账并标完成**；群「进行中」徽标新增 `syncGroupStatus()` 同时回写面板态与列表数据源并重渲染，后端重连时经 `resyncGroups()` 串行整表刷新（串行是必需的——并发时 `renderChatList` 会快照到陈旧数组把旧徽标写回去）。
+4. **Bot 编辑器提交前校验**：`max_tokens` 限 1–65536 整数（留空仍 2048），模型名与设置默认模型双空时拦在提交前并指出去哪儿填；`input` 补 `max` 属性。
+5. **版本三处同源 `4.1.0`**：exe 文件/产品版本、`/health`、侧栏脚注统一；脚注 boot 时读 `/health` 覆盖，反映实际连上的后端产物，避免 UI 与产物各说各话。
+6. **可证伪闸门**：三个 stub 检查脚本（`check-reminders-ui.mjs` 109 条 / `check-bot-skills-ui.mjs` 54 条 / `check-failure-visibility.mjs` 19 条）固化进 `scripts/checks/`，断言必须能被旧代码证伪——修复前副本跑应有 FAIL，修复后全 PASS。
+
 ## v5 变更
 
 1. **`file_read` 目录白名单**：仅允许读取 data 目录、系统临时目录，以及设置表 `file_read_allowlist`（分号分隔的绝对根目录）显式追加的路径；8KB 硬截断不变，越界路径直接拒绝。
@@ -262,6 +273,18 @@ dotnet publish src\AiCompanion.App -c Release -r win-x64
 
 > 第 8 项备注：`reminder` 技能入库、`/api/v1/reminders?due=1` 到期查询与完成标记已由自动化覆盖（ctest + test_api.ps1）。前端已实现到期轮询与提示（主窗口 15s 轮询 → 每周期至多一条 toast → 该条落地才标完成，未见不标完成，未提示的排队到下一轮），独立聊天窗口按设计不参与提示（见「已知限制」）。实机验收仍建议以「HTTP 拒绝内网」「文件 8KB 截断」两项现场观察为准。
 
+### v4.1
+
+1. 单聊生成失败后错误提示留在对话区（不被整表重载擦掉、切走再切回仍跟随该会话、下一次成功不留旧疤）
+2. 群聊失败原因落库，重开房间能看到为什么停了；留痕渲染成群内提示，不伪装成用户 / Bot 消息
+3. Bot 编辑器拦下越界 `max_tokens`（1–65536 整数，留空仍 2048）与「模型名 + 设置默认模型双空」，提示可操作
+4. 到期提醒每 tick 至多一条 toast 真正可见；正文与待发计数合并进同一条；未见不标完成，其余排队到下一轮
+5. 群「进行中」徽标随运行状态实时出现 / 消失；后端重启后陈旧徽标被整表刷新清除；持续在线不重复刷新（无抖动）；detached 窗口不代主窗口刷新
+6. 版本三处统一 `4.1.0`（exe 文件/产品版本、`/health`、侧栏脚注），脚注 boot 时读 `/health` 覆盖
+7. README 含「打包与更新指引」，明确 `publish.cmd` 会连 `data` 一起清掉、需备份与回拷
+8. 三个 stub 闸门全 PASS（修复前副本应 FAIL）：提醒 109 条、技能 54 条、失败可见性 19 条
+9. `ctest` 全绿（v4.1 当时基线 82 用例 / 695 断言；v5 追加 `test_v5.cpp` 后为 91 / 777）；`test_api.ps1` PASSED；WPF 构建 0 警告 0 错误；v1–v4 功能与自动化测试全绿；旧库升级零破坏
+
 ### v5
 
 1. `file_read` 仅允许 data 目录 / 系统临时目录 / `file_read_allowlist` 白名单，越界路径拒绝（ctest 覆盖）
@@ -269,4 +292,4 @@ dotnet publish src\AiCompanion.App -c Release -r win-x64
 3. `http_get` 主机名解析后逐 IP 复检（DNS-Rebinding），不跟随重定向，SSRF 约束不回归（ctest 覆盖）
 4. `max_tokens` / `temperature` / `keep_rounds` / `proxy_port` 服务端收窄（ctest 覆盖）
 5. event_bus Webhook 有界分派（并发 ≤8、队列 ≤256），单次 emit 仍 ≤400ms 送达（ctest 覆盖）
-6. v1–v4 功能与自动化测试全绿；版本号三处 5.0.0
+6. v1–v4.1 功能与自动化测试全绿；版本号三处 5.0.0
