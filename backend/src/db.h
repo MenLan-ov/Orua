@@ -35,6 +35,7 @@ struct Bot {
   int max_tokens = 2048;
   std::string api_type = "openai";
   std::string avatar_path;   // 空 = 用 emoji 头像；否则相对 data 目录的图片路径
+  int64_t persona_id = 0;    // v0.6.1：绑定的人设（0 = 未绑定）
   std::string created_at;
   std::string updated_at;
 };
@@ -79,6 +80,22 @@ struct BotSkill {
   std::string skill_id;
   bool enabled = true;
   std::string params = "{}";
+  std::string created_at;
+  std::string updated_at;
+};
+
+// v0.6.1 人设：独立实体，可被多个 Bot 复用。
+// 与 Bot 的关系是「引用」而不是内嵌——同一个人设可以同时给私聊和群聊用，
+// 也可以给多个 Bot 用（参考稿里的「为所有的群聊/私聊使用同一个人设」）。
+struct Persona {
+  int64_t id = 0;
+  std::string name;                 // 人设名（列表里显示）
+  std::string role_text;            // 角色设定：人物是谁、性格、说话方式
+  std::string admin_rules;          // 管理员附加规则：追加到系统提示，优先级低于角色设定
+  std::string group_display_name;   // 群内展示名（空 = 用 Bot 名）
+  std::string participation = "active";  // 参与度：active | moderate | quiet
+  std::string system_override;      // 高级：整体替换系统提示词（空 = 不替换）
+  bool builtin = false;             // 内置人设不可删
   std::string created_at;
   std::string updated_at;
 };
@@ -130,6 +147,17 @@ std::vector<BotSkill> listBotSkills(int64_t botId);
 // v0.5.3：单独读写某个技能的参数（JSON 文本）。技能未注册时返回 false。
 bool setBotSkillParams(int64_t botId, const std::string& skillId, const std::string& params);
 std::optional<std::string> getBotSkillParams(int64_t botId, const std::string& skillId);
+
+// v0.6.1 人设 CRUD
+std::vector<Persona> listPersonas();
+std::optional<Persona> getPersona(int64_t id);
+Persona createPersona(const Persona& p);
+bool updatePersona(const Persona& p);
+bool deletePersona(int64_t id);   // 内置人设返回 false
+bool setBotPersona(int64_t botId, int64_t personaId);  // 0 = 解除绑定
+// v0.6.1：把人设拼进系统提示词。私聊与群聊都走这里，
+// 保证「Bot 跟着人设走」在两个场景下行为一致。
+std::string applyPersonaToPrompt(const std::string& basePrompt, int64_t personaId);
 Reminder addReminder(int64_t botId, const std::string& content,
                      const std::string& dueAt);
 std::vector<Reminder> listReminders(bool dueOnly);

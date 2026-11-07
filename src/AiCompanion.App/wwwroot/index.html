@@ -32,6 +32,7 @@
         <nav class="side-tabs">
           <button class="tab-btn active" data-view="messages">聊天</button>
           <button class="tab-btn" data-view="bots">Bot</button>
+          <button class="tab-btn" data-view="personas">人设</button>
           <button class="tab-btn" data-view="memory">记忆</button>
           <button class="tab-btn" data-view="plugins">插件</button>
         </nav>
@@ -52,7 +53,7 @@
             <span id="status-text">连接中…</span>
           </div>
           <div class="foot-buttons">
-            <span id="foot-version" class="foot-version">v0.5.3</span>
+            <span id="foot-version" class="foot-version">v0.6.1</span>
             <button id="btn-settings" class="btn-ghost">⚙ 设置</button>
             <button id="btn-quit" class="btn-ghost">退出</button>
           </div>
@@ -106,6 +107,15 @@
                 <button id="btn-bot-delete" class="btn-ghost">删除</button>
               </div>
             </div>
+            <!-- v0.6.1：人设块。放在 System Prompt 之前，因为人设是「他是谁」，
+                 提示词是「怎么说话」，阅读顺序上人设在先。 -->
+            <div class="bot-detail-block persona-block">
+              <div class="persona-block-head">
+                <div class="bot-detail-label">当前人设</div>
+                <button id="btn-bot-persona-change" class="btn-ghost btn-mini">切换</button>
+              </div>
+              <div id="bot-detail-persona" class="persona-summary"></div>
+            </div>
             <div class="bot-detail-block">
               <div class="bot-detail-label">System Prompt</div>
               <div id="bot-detail-prompt" class="bot-detail-text"></div>
@@ -154,6 +164,24 @@
             </div>
           </div>
         </div>
+
+      <!-- v0.6.1 人设视图：人设是独立实体，可被多个 Bot 复用 -->
+      <div id="view-personas" class="view hidden">
+        <div class="view-header">
+          <h2>人设 <span class="h2-sub">Persona</span></h2>
+          <button id="btn-persona-add" class="btn-primary btn-sm">＋ 新建人设</button>
+        </div>
+        <div class="persona-intro">
+          人设决定 Bot「是谁」。绑定后，私聊和群聊都会跟着人设走；长期记忆照常生效，
+          两者叠加而不是互相替代。
+        </div>
+        <div id="persona-list" class="persona-list"></div>
+        <div id="persona-empty" class="empty-state hidden">
+          <div class="empty-icon">🎭</div>
+          <div class="empty-title">还没有人设</div>
+          <div class="empty-sub">新建一个人设，然后到 Bot 详情里绑定</div>
+        </div>
+      </div>
 
       <div id="view-memory" class="view hidden">
         <div class="view-header"><h2>Bot 记忆库</h2></div>
@@ -223,6 +251,54 @@
             <button id="btn-plugin-test" class="btn-ghost">测试连接</button>
             <button class="btn-ghost" data-close="modal-plugin">取消</button>
             <button id="btn-plugin-save" class="btn-primary">保存</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- v0.6.1 人设编辑弹窗（按参考稿：名字 / 群内展示名 / 参与度 / 角色设定 /
+           管理员附加规则 / 系统提示词覆盖） -->
+      <div id="modal-persona" class="modal hidden">
+        <div class="modal-box modal-wide">
+          <h3 id="persona-modal-title">新建人设</h3>
+
+          <div class="field-row">
+            <div class="field-col">
+              <label for="pe-name">人设名 <span class="label-hint">列表里显示</span></label>
+              <input id="pe-name" type="text" placeholder="例如：泡泡（22 岁·傲娇鲸鱼娘）">
+            </div>
+            <div class="field-col">
+              <label for="pe-display">群内展示名 <span class="label-hint">可选</span></label>
+              <input id="pe-display" type="text" placeholder="留空 = 用 Bot 名">
+            </div>
+          </div>
+
+          <label for="pe-participation">参与度 <span class="label-hint">群聊里多主动</span></label>
+          <select id="pe-participation">
+            <option value="active">活跃型 — 主动接话</option>
+            <option value="moderate">适度型 — 有相关话题才说</option>
+            <option value="quiet">安静型 — 被点到才说</option>
+          </select>
+
+          <label for="pe-role">角色设定 <span class="label-hint">必填：他是谁、性格、说话方式</span></label>
+          <textarea id="pe-role" rows="7"
+            placeholder="# 角色：泡泡（22 岁·傲娇鲸鱼娘）&#10;&#10;&gt; 表面是爱说话的小鲸鱼，骨子里是嘴硬心软的傲娇。&#10;&gt; 说话带一点拖尾的「哼」，但会认真听人说话。"></textarea>
+
+          <label for="pe-rules">管理员附加规则 <span class="label-hint">可选，追加到系统提示</span></label>
+          <textarea id="pe-rules" rows="4"
+            placeholder="例如：回复保持简短；不要主动提及自己是 AI。"></textarea>
+
+          <label for="pe-override">系统提示词覆盖 <span class="label-hint">高级·可选</span></label>
+          <div class="label-hint" style="margin:-2px 0 6px">
+            留空 = 使用人设 + Bot 提示词拼接。填写后将<b>整体替换</b>系统提示词，
+            此时角色设定与附加规则都不生效，默认的安全规则与工具协议也会失效。
+          </div>
+          <textarea id="pe-override" rows="5"
+            placeholder="留空即可。仅在你确实想完全接管系统提示时填写。"></textarea>
+
+          <div id="persona-form-error" class="form-error hidden"></div>
+          <div class="modal-actions">
+            <button class="btn-ghost" data-close="modal-persona">取消</button>
+            <button id="btn-persona-save" class="btn-primary">保存</button>
           </div>
         </div>
       </div>

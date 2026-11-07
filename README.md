@@ -120,6 +120,9 @@ node scripts\checks\check-failure-visibility.mjs
 | GET | /skills | 内置技能库（6 个：id / name / description / params_schema） |
 | GET/PUT | /bots/{id}/skills | 该 Bot 技能开关 / 全量覆盖 {skills:[{skill_id, enabled}]}（未知 skill_id 或 skills 非数组 → 400，Bot 不存在 → 404） |
 | GET/PUT | /bots/{id}/skills/{sid}/params | 该 Bot 下某技能的默认参数（PUT 只收对象，上限 8KB；技能未启用 → 404）（v0.5.3） |
+| GET/POST | /personas | 人设列表 / 创建 {name, role_text, admin_rules, group_display_name, participation, system_override}（v0.6.1） |
+| GET/PATCH/DELETE | /personas/{id} | 人设详情 / 编辑（PATCH 只改传入字段）/ 删除（内置 → 400；删除时自动解绑引用它的 Bot）（v0.6.1） |
+| PUT | /bots/{id}/persona | 绑定/解绑人设 {persona_id}（0 = 解绑；目标不存在 → 404）（v0.6.1） |
 | GET/POST | /groups | 群列表 / 创建 {name, bot_ids[2-10], topic?} |
 | GET/PATCH/DELETE | /groups/{id} | 详情（含 members）/ 编辑（运行中改成员 → 409 + code 1002）/ 删除（运行中先停止） |
 | GET | /groups/{id}/messages?limit=200 | 群消息（倒序） |
@@ -211,7 +214,7 @@ curl http://127.0.0.1:8765/health
 powershell -NoProfile -Command "(Get-Item dist\Orua\AiCompanion.exe).VersionInfo | Format-List ProductName,ProductVersion,FileVersion"
 ```
 
-- `/health` 返回 `{"status":"ok","version":"0.5.3"}`；启动器打开后侧栏脚注显示 `v0.5.3`（boot 时读 `/health` 覆盖，因此脚注反映的是**实际连上的后端**，不是 HTML 里的字面量）
+- `/health` 返回 `{"status":"ok","version":"0.6.1"}`；启动器打开后侧栏脚注显示 `v0.6.1`（boot 时读 `/health` 覆盖，因此脚注反映的是**实际连上的后端**，不是 HTML 里的字面量）
 - exe 的 `ProductVersion` / `FileVersion` 来自 `AiCompanion.App.csproj` 的 `<Version>`
 - 旧库首次启动会自动迁移：`group_messages` 的 `role` CHECK 放开 `system`（失败留痕），原地重建并保留全部历史行，幂等；日志里会出现 `db: group_messages 重建以放开 role='system'`
 
@@ -241,6 +244,37 @@ dotnet publish src\AiCompanion.App -c Release -r win-x64
 4. **Bot 编辑器提交前校验**：`max_tokens` 限 1–65536 整数（留空仍 2048），模型名与设置默认模型双空时拦在提交前并指出去哪儿填；`input` 补 `max` 属性。
 5. **版本三处同源 `4.1.0`**：exe 文件/产品版本、`/health`、侧栏脚注统一；脚注 boot 时读 `/health` 覆盖，反映实际连上的后端产物，避免 UI 与产物各说各话。
 6. **可证伪闸门**：三个 stub 检查脚本（`check-reminders-ui.mjs` 109 条 / `check-bot-skills-ui.mjs` 54 条 / `check-failure-visibility.mjs` 19 条）固化进 `scripts/checks/`，断言必须能被旧代码证伪——修复前副本跑应有 FAIL，修复后全 PASS。
+
+## v0.6.1 变更
+
+> 新增「人设」系统：把「这个 Bot 是谁」从 System Prompt 里拆出来，做成可复用、可切换的独立实体。顺带修掉窄窗口下内容区被侧栏挤成 0 的布局缺陷。
+
+1. **人设是独立实体**（`personas_v2` 表）：一条人设可被多个 Bot 共用，也能同时作用于私聊和群聊——这正是参考稿里「为所有的群聊/私聊使用同一个人设」的用法。Bot 通过 `persona_id` 引用（`0` = 未绑定）。
+2. **人设真正影响回复**：`db::applyPersonaToPrompt` 把「角色设定 + 管理员附加规则 + Bot 自己的 System Prompt」拼成最终系统提示。拼装顺序是刻意的——角色设定在最前（定义「我是谁」，权重最高），Bot 的提示词在最后（紧贴对话，模型对末尾更敏感）。
+3. **群聊也跟人设走**：此前 `group_engine.cpp` 直接用 `bot.system_prompt`，绕过人设，会出现「私聊变了、群里还是老样子」。现在私聊与群聊走同一段拼接逻辑。
+4. **人设与记忆叠加而非互斥**：记忆块照旧追加在系统提示之后，顺序为 `人设+提示词 → [长期记忆] → 历史 → 本轮输入`。有单测钉住这个顺序，避免以后改动让记忆盖过人设。
+5. **高级「系统提示词覆盖」**：填写后整体替换系统提示（角色设定与附加规则不再参与，避免出现「以为覆盖了、其实混进了别的规则」）。表单里明确写了这会连默认安全规则与工具协议一起失效。
+6. **内置人设**：首次建库种入「温暖陪伴 / 理性顾问 / 活跃群友」三条，幂等——只在表为空时插入，用户删掉后不会下次启动又冒出来。内置人设不可删（`deletePersona` 返回 false）。
+7. **删除人设自动解绑**：`deletePersona` 先把引用它的 Bot 的 `persona_id` 置 0，不留悬空引用。
+8. **人设页**（侧栏新增「人设」页签）：卡片列出人设名、参与度、角色设定摘要，以及「使用中：某某 Bot」——删除前能看到影响面。
+9. **Bot 详情新增人设块**：位置在 System Prompt 之上（人设是「他是谁」，提示词是「怎么说话」），显示当前人设摘要与「切换」入口。
+10. **修窄窗口布局塌陷**：`#sidebar` 原为 `width:260px; flex:none`，窗口变窄时侧栏不肯收缩，把内容区挤成 **0 宽**——输入框只剩 22px、发送按钮跑出视口。改为 `flex:0 1 260px; min-width:0`，并补 720px / 520px 宽度与 520px 高度三档断点。实测 214×1152 下内容区从 0 → 90px，输入框 22 → 66px。
+11. **修 Bot 页右侧整片空白**：有 Bot 但未选中时，`#bots-empty` 与 `#bot-detail` 同时隐藏，右半边什么都没有。现在自动落到第一个 Bot；搜索无结果时文案区分「没有匹配」与「还没有 Bot」。
+12. **修记忆页溢出**：`grid-template-columns: 240px 1fr` 在窄容器下把右列挤出视口，「刷新」按钮被裁掉；`#view-memory` 此前完全没有容器样式，标题贴着窗口边缘。改用 `minmax(0,1fr)` 并补内边距与三档断点。
+13. **人设弹窗**：字段对齐参考稿（人设名 / 群内展示名 / 参与度 / 角色设定 / 管理员附加规则 / 系统提示词覆盖）。字段较多，改为内容区滚动 + 底部按钮吸附，任何窗口高度下都能直接保存。
+
+### v0.6.1
+
+1. 侧栏出现「人设」页签，首次启动有 3 条内置人设，带「内置」标记且不可删除。
+2. 「＋ 新建人设」打开弹窗，六个字段齐全；人设名为空或「角色设定与覆盖都为空」时拦在提交前并给出原因。
+3. 新建的人设立即出现在列表，可编辑、可删除；删除前提示哪些 Bot 正在使用它。
+4. Bot 详情页显示「当前人设」，未绑定时说明「未绑定人设 — 只使用下面的 System Prompt」；点「切换」可绑定/解绑。
+5. 绑定后该 Bot 的私聊与群聊都按人设回复；解绑后行为回到绑定前。
+6. 「系统提示词覆盖」填写后整体替换系统提示；留空则走拼接，Bot 原提示词不被丢弃。
+7. 删除人设后，原引用它的 Bot `persona_id` 归 0，不残留悬空引用。
+8. 窗口拖到很窄（如 900×620）时，侧栏与内容区都可用，输入框与发送按钮完整可见，无横向溢出。
+9. 后端 `backend_tests` 109 用例 / 883 断言全通过；三个 stub 闸门 109 / 54 / 19 全通过；人设端到端 `e2e_persona_v061.mjs` 16 条全通过。
+10. 版本号三处同源 `0.6.1`：exe 文件版本 `0.6.1.0`、`/health` 返回 `0.6.1`、侧栏脚注显示 `v0.6.1`。
 
 ## v0.5.3 变更
 

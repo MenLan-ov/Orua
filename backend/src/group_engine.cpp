@@ -281,7 +281,10 @@ llm::ChatRequest GroupEngine::buildRequest(const db::Bot& bot) {
     req.proxy_port = 0;
   }
 
-  req.messages.push_back({"system", bot.system_prompt});
+  // v0.6.1：群聊也要跟着人设走。此前这里直接用 bot.system_prompt，
+  // 于是「设了人设但群里说话还是老样子」。
+  req.messages.push_back({"system", db::applyPersonaToPrompt(bot.system_prompt,
+                                                             bot.persona_id)});
   auto group = db::getGroup(groupId_);
   if (group && !group->topic.empty())
     req.messages.push_back({"system", "当前群聊话题：" + group->topic});

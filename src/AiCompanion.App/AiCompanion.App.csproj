@@ -11,7 +11,7 @@
     <ApplicationIcon>Assets\Orua.ico</ApplicationIcon>
     <!-- 版本三处同源：此处给 exe 文件/产品版本，backend /health 给运行时版本，
          前端脚注 boot 时读 /health 覆盖，避免 UI 与实际后端产物各说各话。 -->
-    <Version>0.5.3</Version>
+    <Version>0.6.1</Version>
     <Product>Orua</Product>
     <Description>Orua — Windows 桌面 AI 陪伴（多 Bot + 群聊围观）</Description>
   </PropertyGroup>

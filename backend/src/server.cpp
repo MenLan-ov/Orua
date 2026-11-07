@@ -73,8 +73,22 @@ json botToJson(const db::Bot& b) {
           {"max_tokens", b.max_tokens},
           {"api_type", b.api_type},
           {"avatar_url", b.avatar_path.empty() ? json(nullptr) : json(b.avatar_path)},
+          {"persona_id", b.persona_id},
           {"created_at", b.created_at},
           {"updated_at", b.updated_at}};
+}
+
+json personaToJson(const db::Persona& p) {
+  return {{"id", p.id},
+          {"name", p.name},
+          {"role_text", p.role_text},
+          {"admin_rules", p.admin_rules},
+          {"group_display_name", p.group_display_name},
+          {"participation", p.participation},
+          {"system_override", p.system_override},
+          {"builtin", p.builtin},
+          {"created_at", p.created_at},
+          {"updated_at", p.updated_at}};
 }
 
 json sessionToJson(const db::Session& s) {
@@ -219,10 +233,13 @@ struct BotConfig {
   int max_tokens = 0;
 };
 
+// v0.6.1：人设拼进系统提示词。实现在 db 层（applyPersonaToPrompt），
+// 因为群聊引擎不走这里、也要用同一段逻辑。
+//
 // 覆盖项为空 = 继承全局默认（settings）
 BotConfig resolveBotConfig(const db::Bot& bot) {
   BotConfig cfg;
-  cfg.system_prompt = bot.system_prompt;
+  cfg.system_prompt = db::applyPersonaToPrompt(bot.system_prompt, bot.persona_id);
   cfg.temperature = bot.temperature;
   cfg.max_tokens = bot.max_tokens;
   cfg.base_url = bot.api_base_url;
@@ -602,6 +619,8 @@ void registerBotRoutes(httplib::Server& svr) {
     }
     std::string key = b.value("api_key", "");
     if (!key.empty()) bot.api_key_enc = dpapi::protect(key);
+    if (b.contains("persona_id") && b["persona_id"].is_number_integer())
+      bot.persona_id = b["persona_id"].get<int64_t>();
     bot = db::createBot(bot);
     res.set_content(okJson(botToJson(bot)).dump(), "application/json; charset=utf-8");
   });
@@ -631,6 +650,8 @@ void registerBotRoutes(httplib::Server& svr) {
       }
     }
     if (b.contains("avatar_path")) bot->avatar_path = b["avatar_path"].get<std::string>();
+    if (b.contains("persona_id") && b["persona_id"].is_number_integer())
+      bot->persona_id = b["persona_id"].get<int64_t>();
     if (b.contains("api_key")) {
       // 空串 = 清除覆盖，不传 = 不变
       std::string key = b["api_key"].get<std::string>();
@@ -995,6 +1016,113 @@ std::string normalizePlugin(const json& body, cfg::Plugin& out, std::string& err
 }
 
 }  // namespace
+
+/* ---------- 人设路由（v0.6.1） ---------- */
+// 人设是独立实体，Bot 通过 persona_id 引用。这样一个人设能同时服务
+// 私聊和群聊、也能给多个 Bot 用，符合参考稿里「为所有会话使用同一个人设」的用法。
+void registerPersonaRoutes(httplib::Server& svr) {
+  svr.Get("/api/v1/personas", [](const httplib::Request&, httplib::Response& res) {
+    json arr = json::array();
+    for (auto& p : db::listPersonas()) arr.push_back(personaToJson(p));
+    res.set_content(okJson(json{{"personas", arr}}).dump(),
+                    "application/json; charset=utf-8");
+  });
+
+  svr.Get(R"(/api/v1/personas/(\d+))", [](const httplib::Request& req, httplib::Response& res) {
+    int64_t id = std::stoll(req.matches[1].str());
+    auto p = db::getPersona(id);
+    if (!p) { fail(res, 404, 404, "人设不存在"); return; }
+    res.set_content(okJson(personaToJson(*p)).dump(), "application/json; charset=utf-8");
+  });
+
+  svr.Post("/api/v1/personas", [](const httplib::Request& req, httplib::Response& res) {
+    json b = parseBody(req, res);
+    if (res.status == 400) return;
+    std::string name = b.value("name", "");
+    if (name.empty()) { fail(res, 400, 400, "人设名不能为空"); return; }
+    db::Persona p;
+    p.name = name;
+    p.role_text = b.value("role_text", "");
+    p.admin_rules = b.value("admin_rules", "");
+    p.group_display_name = b.value("group_display_name", "");
+    p.participation = b.value("participation", "active");
+    p.system_override = b.value("system_override", "");
+    if (p.participation != "active" && p.participation != "moderate" &&
+        p.participation != "quiet") {
+      fail(res, 400, 400, "participation 仅支持 active/moderate/quiet");
+      return;
+    }
+    p = db::createPersona(p);
+    res.set_content(okJson(personaToJson(p)).dump(), "application/json; charset=utf-8");
+  });
+
+  svr.Patch(R"(/api/v1/personas/(\d+))", [](const httplib::Request& req, httplib::Response& res) {
+    json b = parseBody(req, res);
+    if (res.status == 400) return;
+    int64_t id = std::stoll(req.matches[1].str());
+    auto cur = db::getPersona(id);
+    if (!cur) { fail(res, 404, 404, "人设不存在"); return; }
+    db::Persona p = *cur;
+    if (b.contains("name")) {
+      std::string n = b.value("name", "");
+      if (n.empty()) { fail(res, 400, 400, "人设名不能为空"); return; }
+      p.name = n;
+    }
+    if (b.contains("role_text")) p.role_text = b.value("role_text", "");
+    if (b.contains("admin_rules")) p.admin_rules = b.value("admin_rules", "");
+    if (b.contains("group_display_name"))
+      p.group_display_name = b.value("group_display_name", "");
+    if (b.contains("participation")) {
+      std::string v = b.value("participation", "active");
+      if (v != "active" && v != "moderate" && v != "quiet") {
+        fail(res, 400, 400, "participation 仅支持 active/moderate/quiet");
+        return;
+      }
+      p.participation = v;
+    }
+    if (b.contains("system_override")) p.system_override = b.value("system_override", "");
+    db::updatePersona(p);
+    res.set_content(okJson(personaToJson(p)).dump(), "application/json; charset=utf-8");
+  });
+
+  svr.Delete(R"(/api/v1/personas/(\d+))", [](const httplib::Request& req,
+                                             httplib::Response& res) {
+    int64_t id = std::stoll(req.matches[1].str());
+    auto p = db::getPersona(id);
+    if (!p) { fail(res, 404, 404, "人设不存在"); return; }
+    if (p->builtin) { fail(res, 400, 400, "内置人设不可删除"); return; }
+    if (!db::deletePersona(id)) { fail(res, 400, 400, "删除失败"); return; }
+    res.set_content(okJson(json{{"deleted", id}}).dump(),
+                    "application/json; charset=utf-8");
+  });
+
+  // 绑定/解绑：body {persona_id: N}，0 = 解绑
+  svr.Put(R"(/api/v1/bots/(\d+)/persona)",
+          [](const httplib::Request& req, httplib::Response& res) {
+            json b = parseBody(req, res);
+            if (res.status == 400) return;
+            int64_t botId = std::stoll(req.matches[1].str());
+            auto bot = db::getBot(botId);
+            if (!bot) { fail(res, 404, 404, "机器人不存在"); return; }
+            int64_t pid = 0;
+            if (b.contains("persona_id")) {
+              if (!b["persona_id"].is_number_integer()) {
+                fail(res, 400, 400, "persona_id 必须是整数");
+                return;
+              }
+              pid = b["persona_id"].get<int64_t>();
+            }
+            // 绑定时校验目标存在，避免 Bot 指向一个不存在的人设（行为会静默退回无入设）
+            if (pid > 0 && !db::getPersona(pid)) {
+              fail(res, 404, 404, "人设不存在");
+              return;
+            }
+            db::setBotPersona(botId, pid);
+            auto updated = db::getBot(botId);
+            res.set_content(okJson(botToJson(*updated)).dump(),
+                            "application/json; charset=utf-8");
+          });
+}
 
 void registerPluginRoutes(httplib::Server& svr, const std::string& cfgPath) {
   // v0.5.3：测试连接。放在插件路由之前，避免被 /api/v1/plugins 的通配吞掉。
@@ -1615,7 +1743,7 @@ void registerRoutes(httplib::Server& svr, const std::string& staticDir,
   });
 
   svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
-    res.set_content("{\"status\":\"ok\",\"version\":\"0.5.3\"}", "application/json; charset=utf-8");
+    res.set_content("{\"status\":\"ok\",\"version\":\"0.6.1\"}", "application/json; charset=utf-8");
   });
 
   registerSkillRoutes(svr);
@@ -1623,6 +1751,7 @@ void registerRoutes(httplib::Server& svr, const std::string& staticDir,
   registerMemoryRoutes(svr);
   registerConfigRoutes(svr);
   registerBotRoutes(svr);
+  registerPersonaRoutes(svr);
   registerGroupRoutes(svr);
   registerSessionRoutes(svr);
   registerMessageRoutes(svr);

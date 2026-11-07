@@ -135,9 +135,11 @@ label.chk input { width: auto; }
 .tb-btn:hover { background: var(--bg-hover); color: var(--text); }
 .tb-btn.tb-close:hover { background: var(--danger); color: #fff; }
 
-/* ============ 侧边栏（260px） ============ */
+/* ============ 侧边栏（260px，窄窗口自动收缩） ============ */
+/* 用 flex-basis + min-width:0 而不是固定 width：窗口变窄时侧栏让位，
+   否则 260px 的固定宽度会把内容区压成 0 宽（输入框只剩一条缝）。 */
 #sidebar {
-  width: 260px; flex: none; display: flex; flex-direction: column;
+  flex: 0 1 260px; min-width: 0; display: flex; flex-direction: column;
   background: var(--bg-panel); border-right: 1px solid var(--border);
   padding: 14px 12px 10px; gap: 12px;
 }
@@ -193,7 +195,9 @@ label.chk input { width: auto; }
 .foot-version { font-size: 11px; color: var(--text-dim); margin-right: auto; }
 
 /* ============ 内容区 ============ */
-#content { flex: 1; min-width: 0; display: flex; }
+/* min-width:0 是关键：没有它，内容区里的长文本（URL、代码）会把 flex 子项
+   撑到超出容器，反过来挤压侧栏。 */
+#content { flex: 1 1 0; min-width: 0; display: flex; }
 .view { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
 /* ============ 空状态 ============ */
@@ -449,9 +453,14 @@ label.chk input { width: auto; }
 
 #view-plugins { padding: 16px 20px 18px; box-sizing: border-box;
                 overflow-y: auto; display: block; }
-#view-plugins .view-header { display: flex; align-items: center; gap: 10px;
-                             flex-wrap: wrap; margin-bottom: 10px; }
-#view-plugins .view-header h2 { margin: 0; font-size: 20px; white-space: nowrap; }
+/* 视图头部通用化：人设页与插件页共用同一套排布，避免两页各写一份、
+   改一处漏一处（此前只有 #view-plugins 作用域，人设页拿不到样式）。 */
+#view-plugins .view-header, #view-personas .view-header {
+  display: flex; align-items: center; gap: 10px;
+  flex-wrap: wrap; margin-bottom: 10px; }
+#view-plugins .view-header h2, #view-personas .view-header h2 {
+  margin: 0; font-size: 20px; white-space: nowrap; }
+#view-personas .view-header .btn-primary { margin-left: auto; }
 .h2-sub { font-size: 13px; font-weight: 400; color: var(--text-dim, #94a3b8); }
 
 /* 搜索框：flex:1 吃掉剩余宽度，但设上限避免超宽屏下拉得离谱 */
@@ -558,8 +567,164 @@ label.chk input { width: auto; }
                  background: var(--bg, #0f172a); margin-bottom: 7px; gap: 10px; }
 .bot-skill-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis;
                       white-space: nowrap; }
+
+/* 矮窗口：高度不足时优先保输入框，压缩头像区和按钮留白 */
+@media (max-height: 520px) {
+  #sidebar { padding-top: 8px; gap: 8px; }
+  .side-profile { display: none; }
+  .side-actions { flex-direction: row; }
+  .side-actions .btn-primary { padding: 5px 8px; font-size: 12px; }
+  .list-area { gap: 3px; }
+  .list-item { padding: 6px 8px; }
+  .composer { padding: 8px 16px 10px; }
+  .composer textarea { margin-bottom: 6px; }
+  .chat-head { padding: 8px 16px; }
+  .messages { padding: 12px 16px; gap: 10px; }
+  .empty-icon { font-size: 32px; }
+}
+
+/* ============ 窄窗口适配 ============ */
+/* 用户会把窗口拖得很窄。此前侧栏固定 260px，窗口一旦小于约 300px，
+   内容区宽度就是 0——输入框被压成一条 22px 的缝，发送按钮溢出到窗口外。
+   这里按「先让侧栏变窄、再隐藏次要信息」的顺序降级，保证输入框始终可用。 */
+@media (max-width: 720px) {
+  #sidebar { flex-basis: 200px; padding: 10px 8px 8px; gap: 8px; }
+  .side-search { display: none; }        /* 搜索是次要功能，先让位 */
+  .foot-version { display: none; }
+  .messages, .group-messages { padding: 14px 12px; }
+  .composer { padding: 10px 12px 12px; }
+  .chat-head { padding: 10px 12px; }
+  .msg, .gmsg { max-width: 92%; }
+}
+
+/* 极窄：侧栏变成图标条，只留切页签和新建入口 */
+@media (max-width: 520px) {
+  #sidebar { flex-basis: 124px; padding: 8px 6px; }
+  .side-profile { display: none; }
+  .profile-sub { display: none; }
+  .side-tabs { flex-direction: column; gap: 2px; }
+  .tab-btn { padding: 5px 0; font-size: 12px; }
+  .side-actions { gap: 5px; }
+  .side-actions .btn-primary { padding: 6px 4px; font-size: 12px; }
+  .list-item { padding: 7px 6px; gap: 6px; }
+  .list-item-avatar { width: 22px; font-size: 17px; }
+  .list-item-sub, .list-item-btn { display: none; }
+  .foot-buttons { flex-wrap: wrap; gap: 3px; }
+  .foot-buttons .btn-ghost { padding: 4px 5px; font-size: 11px; }
+  .composer-bar { gap: 6px; }
+  .chat-actions .btn-ghost { padding: 4px 6px; font-size: 11px; }
+}
 /* 全局 input{width:100%} 会把勾选框也撑满整行，把技能名挤成「计...」；
    这里显式收回复选框宽度，让名称占满剩余空间。 */
 .bot-skill-row input[type="checkbox"] { width: auto; flex: 0 0 auto; margin: 0; }
 .bot-skill-picker { margin-bottom: 10px; }
 .bot-skill-picker select { width: 100%; }
+
+/* ============ v0.6.1 人设 ============ */
+#view-personas { padding: 16px 20px 18px; box-sizing: border-box;
+                 overflow-y: auto; display: block; }
+.persona-intro { font-size: 12.5px; line-height: 1.65; color: var(--text-dim);
+                 background: var(--bg-panel); border: 1px solid var(--border);
+                 border-left: 3px solid var(--accent);
+                 border-radius: 8px; padding: 10px 13px; margin-bottom: 12px; }
+.persona-list { display: flex; flex-direction: column; gap: 9px; }
+.persona-card {
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 11px 14px; transition: border-color .15s;
+}
+.persona-card:hover { border-color: var(--accent); }
+.persona-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.persona-card-name { font-size: 14px; font-weight: 600; }
+.persona-tag { font-size: 10.5px; padding: 1px 7px; border-radius: 999px;
+               background: var(--bg-elevated); color: var(--text-dim); }
+.persona-tag.builtin { background: rgba(59,130,246,.15); color: var(--accent); }
+.persona-card-spacer { flex: 1; }
+.persona-card-body { font-size: 12.5px; line-height: 1.6; color: var(--text-dim);
+                     margin-top: 6px; white-space: pre-wrap; word-break: break-word;
+                     max-height: 4.8em; overflow: hidden; }
+.persona-card-foot { display: flex; align-items: center; gap: 8px;
+                     margin-top: 8px; font-size: 11.5px; color: var(--text-dim); }
+.persona-users { flex: 1; min-width: 0; overflow: hidden;
+                 text-overflow: ellipsis; white-space: nowrap; }
+
+/* Bot 详情里的人设块 */
+.persona-block-head { display: flex; align-items: center; justify-content: space-between;
+                      gap: 10px; }
+.btn-mini { padding: 3px 9px; font-size: 11.5px; }
+.persona-summary { font-size: 13px; line-height: 1.7; }
+.persona-summary .persona-none { color: var(--text-dim); font-size: 12.5px; }
+.persona-summary .persona-name { font-weight: 600; font-size: 13.5px; }
+.persona-summary .persona-meta { font-size: 11.5px; color: var(--text-dim);
+                                 margin-top: 3px; }
+.persona-summary .persona-role { margin-top: 7px; white-space: pre-wrap;
+                                 word-break: break-word; font-size: 12.5px;
+                                 color: var(--text-dim); max-height: 6.4em;
+                                 overflow: hidden; }
+
+/* 人设弹窗更宽：字段多，440px 会把两列挤成一列 */
+.modal-wide { width: 640px; }
+.modal-wide textarea { font-family: inherit; line-height: 1.6; font-size: 12.5px; }
+
+/* 人设弹窗：字段多，整框滚动会把「保存」按钮推到看不见的地方。
+   改为内容区滚动 + 底部按钮吸附，保证任何时候都能直接保存。 */
+.modal-wide { display: flex; flex-direction: column; max-height: 88vh; }
+.modal-wide .modal-actions {
+  position: sticky; bottom: 0; margin-top: 14px; padding-top: 12px;
+  background: var(--bg-elevated);
+  border-top: 1px solid var(--border);
+}
+.modal-wide > label { display: block; margin: 13px 0 5px; font-size: 12.5px; }
+.modal-wide > label .label-hint { margin-left: 6px; }
+.modal-wide .field-row { margin-bottom: 2px; }
+.modal-wide .field-col label { margin-bottom: 5px; }
+/* 窄窗口下弹窗不能贴边：留出可点遮罩关闭的余量 */
+@media (max-width: 720px) {
+  .modal-wide { width: calc(100vw - 32px); }
+}
+
+/* 人设卡片：正文原先只露 3 行、按钮被 flex:1 推到最右，右侧一大片空白。
+   改为按钮跟随内容、正文多露两行，信息密度更合理。 */
+.persona-card { padding: 12px 15px; }
+.persona-card-body {
+  max-height: 5.6em; margin-top: 7px;
+  -webkit-mask-image: linear-gradient(180deg, #000 72%, transparent);
+  mask-image: linear-gradient(180deg, #000 72%, transparent);
+}
+.persona-card-foot { margin-top: 10px; gap: 7px; }
+.persona-users { flex: 0 1 auto; }
+.persona-card-foot .btn-mini { flex: none; }
+.persona-card-foot::before { content: ''; flex: 1 1 auto; }
+
+/* 修正：::before 撑开导致「使用中」与按钮分居两端、中间一大段空白。
+   改为整组靠右，视觉上成为一个操作区。 */
+.persona-card-foot { justify-content: flex-end; }
+.persona-card-foot::before { display: none; }
+.persona-card-foot .persona-users { flex: 0 1 auto; margin-right: 4px; }
+
+/* 记忆页溢出修复：240px + 1fr 在窄容器下会让右列被挤出视口，
+   「刷新」按钮被裁掉。minmax(0,1fr) 允许右列收缩，工具栏也允许换行。 */
+.memory-layout { grid-template-columns: 240px minmax(0, 1fr); }
+.memory-panel { min-width: 0; }
+.memory-toolbar { flex-wrap: wrap; }
+.memory-toolbar input { flex: 1 1 160px; min-width: 0; }
+.mem-item { min-width: 0; }
+.mem-content { word-break: break-word; }
+@media (max-width: 860px) {
+  .memory-layout { grid-template-columns: 180px minmax(0, 1fr); }
+}
+@media (max-width: 640px) {
+  .memory-layout { grid-template-columns: minmax(0, 1fr); }
+  .memory-bots { border-right: none; padding-right: 0;
+                 border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+}
+
+/* 记忆页此前没有任何容器样式：标题贴窗口边缘、与内容挤在一起。
+   与插件页/人设页对齐，补上统一的内边距与标题排布。 */
+#view-memory { padding: 16px 20px 18px; box-sizing: border-box;
+               display: flex; flex-direction: column; overflow: hidden; }
+#view-memory .view-header { display: flex; align-items: center; gap: 10px;
+                            margin-bottom: 10px; flex: none; }
+#view-memory .view-header h2 { margin: 0; font-size: 20px; white-space: nowrap; }
+#view-memory .memory-layout { flex: 1; min-height: 0; }
+#view-memory .memory-bots h3 { margin: 0 0 8px; font-size: 13px;
+                               color: var(--text-dim); font-weight: 600; }

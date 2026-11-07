@@ -187,6 +187,7 @@ const App = {
     reads: {},
     sessions: [],
     bots: [],
+    personas: [],
     groups: [],
     defaultBotId: 0,
     selectedBotId: null,
@@ -261,6 +262,7 @@ async function switchView(view) {
   $('view-bots').classList.toggle('hidden', view !== 'bots');
   $('view-groups').classList.toggle('hidden', view !== 'groups' && !inGroupRoom);
   $('view-memory').classList.toggle('hidden', view !== 'memory');
+  $('view-personas').classList.toggle('hidden', view !== 'personas');
   $('view-plugins').classList.toggle('hidden', view !== 'plugins');
   $('btn-new-session').classList.toggle('hidden', view !== 'messages');
   $('btn-new-bot').classList.toggle('hidden', view !== 'bots');
@@ -277,6 +279,15 @@ async function switchView(view) {
   }
   if (view === 'messages') renderChatList();
   if (view === 'memory') { renderMemoryBots(); loadMemories(); }
+  if (view === 'personas') { try { await loadPersonas(); } catch (e) { toast(e.message || '人设加载失败'); } }
+  // Bot 详情要显示「当前人设」，所以进 Bot 视图时也得把人设拉回来，
+  // 否则会误显示成「未绑定」。
+  if (view === 'bots') {
+    if (!App.state.personas.length) {
+      try { await loadPersonas(); } catch (e) { /* 人设加载失败不该挡住 Bot 页 */ }
+    }
+    renderBotDetail();
+  }
   if (view === 'plugins') {
     if (!App.state.pluginBotId && App.state.bots.length) App.state.pluginBotId = App.state.bots[0].id;
     try {
@@ -716,6 +727,21 @@ function renderBots() {
   const list = App.state.bots.filter((b) => !q || b.name.toLowerCase().includes(q));
   el.innerHTML = '';
   $('bots-empty').classList.toggle('hidden', list.length > 0);
+  // 搜索无结果时文案要说清是「搜不到」而不是「还没有 Bot」，
+  // 否则用户会以为自己的 Bot 丢了。
+  if (App.state.bots.length && !list.length) {
+    $('bots-empty').querySelector('.empty-title').textContent = '没有匹配的 Bot';
+    $('bots-empty').querySelector('.empty-sub').textContent = `没有名字包含「${App.state.search.trim()}」的 Bot`;
+  } else if (list.length) {
+    $('bots-empty').querySelector('.empty-title').textContent = '还没有 Bot';
+    $('bots-empty').querySelector('.empty-sub').textContent = '点击「＋ 新 Bot」创建你的第一位 AI 伙伴';
+  }
+  // 有 Bot 但没选中时右侧会整片空白（empty 与 detail 同时隐藏），
+  // 因此自动落到第一个，保证「有内容就一定有东西可看」。
+  if (!App.state.selectedBotId && list.length) App.state.selectedBotId = list[0].id;
+  if (App.state.selectedBotId && !list.some((b) => b.id === App.state.selectedBotId)) {
+    App.state.selectedBotId = list.length ? list[0].id : null;
+  }
   for (const b of list) {
     const item = document.createElement('div');
     item.className = 'list-item' + (b.id === App.state.selectedBotId ? ' active' : '');
@@ -758,6 +784,7 @@ function renderBotDetail() {
     `API：${escapeHtml(b.api_base_url || '继承默认配置')} · 模型：${escapeHtml(b.api_model || '继承默认配置')}<br>` +
     `Key：${b.api_key ? escapeHtml(b.api_key) : '继承默认配置'}`;
   $('bot-detail-greeting').textContent = b.greeting || '（无）';
+  renderBotPersonaBlock(b);
 }
 
 // PUT /bots/{id}/skills 是整表替换：勾选未与服务端现状对齐时保存不得提交，否则会清空既有技能
@@ -873,6 +900,241 @@ App.registerCommand('delete-bot', async (id) => {
   }
   await refreshBots();
   renderChatList();
+});
+
+/* ================= v0.6.1 人设 ================= */
+// 人设是独立实体，Bot 通过 persona_id 引用。因此这里只管人设本身，
+// 绑定关系由 Bot 详情页的「人设」块负责。
+
+const PARTICIPATION_LABEL = {
+  active: '活跃型',
+  moderate: '适度型',
+  quiet: '安静型',
+};
+
+async function loadPersonas() {
+  const r = await App.api.get('/api/v1/personas');
+  App.state.personas = r.personas || [];
+  renderPersonas();
+  return App.state.personas;
+}
+
+// 某个 Bot 名用了哪些人设——用于在卡片上显示「被谁使用」，
+// 让用户在删除人设前能看到影响面
+function personaUsers(pid) {
+  return (App.state.bots || []).filter((b) => b.persona_id === pid).map((b) => b.name);
+}
+
+function renderPersonas() {
+  const list = $('persona-list');
+  const empty = $('persona-empty');
+  const items = App.state.personas || [];
+  list.innerHTML = '';
+  empty.classList.toggle('hidden', items.length > 0);
+  if (!items.length) return;
+
+  for (const p of items) {
+    const card = document.createElement('div');
+    card.className = 'persona-card';
+    card.dataset.personaId = String(p.id);
+
+    const head = document.createElement('div');
+    head.className = 'persona-card-head';
+    head.innerHTML =
+      `<span class="persona-card-name">${escapeHtml(p.name)}</span>` +
+      (p.builtin ? '<span class="persona-tag builtin">内置</span>' : '') +
+      `<span class="persona-tag">${escapeHtml(PARTICIPATION_LABEL[p.participation] || p.participation)}</span>` +
+      '<span class="persona-card-spacer"></span>';
+    card.appendChild(head);
+
+    const body = document.createElement('div');
+    body.className = 'persona-card-body';
+    body.textContent = p.role_text || '（未填写角色设定）';
+    card.appendChild(body);
+
+    const foot = document.createElement('div');
+    foot.className = 'persona-card-foot';
+    const users = personaUsers(p.id);
+    const usersEl = document.createElement('span');
+    usersEl.className = 'persona-users';
+    usersEl.textContent = users.length
+      ? `使用中：${users.join('、')}`
+      : '尚未被任何 Bot 使用';
+    foot.appendChild(usersEl);
+
+    const editBtn = document.createElement('button');
+    editBtn.className = 'btn-ghost btn-mini';
+    editBtn.dataset.personaEdit = String(p.id);
+    editBtn.textContent = '编辑';
+    editBtn.addEventListener('click', () => openPersonaModal(p));
+    foot.appendChild(editBtn);
+
+    if (!p.builtin) {
+      const delBtn = document.createElement('button');
+      delBtn.className = 'btn-ghost btn-mini';
+      delBtn.dataset.personaDel = String(p.id);
+      delBtn.textContent = '删除';
+      delBtn.addEventListener('click', () => deletePersona(p));
+      foot.appendChild(delBtn);
+    }
+    card.appendChild(foot);
+    list.appendChild(card);
+  }
+}
+
+function openPersonaModal(p) {
+  $('persona-modal-title').textContent = p ? '编辑人设' : '新建人设';
+  $('pe-name').value = p?.name || '';
+  $('pe-display').value = p?.group_display_name || '';
+  $('pe-participation').value = p?.participation || 'active';
+  $('pe-role').value = p?.role_text || '';
+  $('pe-rules').value = p?.admin_rules || '';
+  $('pe-override').value = p?.system_override || '';
+  $('persona-form-error').classList.add('hidden');
+  $('modal-persona').dataset.personaId = p?.id || '';
+  $('modal-persona').classList.remove('hidden');
+}
+
+App.registerCommand('save-persona', async () => {
+  const errEl = $('persona-form-error');
+  const showErr = (msg) => { errEl.textContent = msg; errEl.classList.remove('hidden'); };
+  errEl.classList.add('hidden');
+
+  const name = $('pe-name').value.trim();
+  if (!name) { showErr('人设名不能为空'); return; }
+  const role = $('pe-role').value.trim();
+  const override = $('pe-override').value.trim();
+  // 角色设定与覆盖二者至少有一个，否则人设等于没配
+  if (!role && !override) {
+    showErr('请至少填写「角色设定」或「系统提示词覆盖」');
+    return;
+  }
+
+  const body = {
+    name,
+    group_display_name: $('pe-display').value.trim(),
+    participation: $('pe-participation').value,
+    role_text: role,
+    admin_rules: $('pe-rules').value.trim(),
+    system_override: override,
+  };
+  const id = $('modal-persona').dataset.personaId;
+  try {
+    if (id) await App.api.patch(`/api/v1/personas/${id}`, body);
+    else await App.api.post('/api/v1/personas', body);
+  } catch (e) {
+    showErr(e.message || '保存失败');
+    return;
+  }
+  $('modal-persona').classList.add('hidden');
+  await loadPersonas();
+  // Bot 详情里显示的人设摘要也要跟着刷新，否则编辑完看着像没生效
+  if (App.state.view === 'bots') renderBotDetail();
+  toast('人设已保存');
+});
+
+async function deletePersona(p) {
+  const users = personaUsers(p.id);
+  const warn = users.length
+    ? `\n\n注意：${users.join('、')} 正在使用它，删除后这些 Bot 会解除绑定。`
+    : '';
+  if (!confirm(`删除人设「${p.name}」？${warn}`)) return;
+  try {
+    await App.api.del(`/api/v1/personas/${p.id}`);
+  } catch (e) {
+    toast(e.message || '删除失败');
+    return;
+  }
+  await loadPersonas();
+  await refreshBots();
+  if (App.state.view === 'bots') renderBotDetail();
+  toast('人设已删除');
+}
+
+// Bot 详情页的人设块
+function renderBotPersonaBlock(b) {
+  const el = $('bot-detail-persona');
+  if (!el) return;
+  const p = (App.state.personas || []).find((x) => x.id === b.persona_id);
+  if (!p) {
+    el.innerHTML = '<span class="persona-none">未绑定人设 — 只使用下面的 System Prompt</span>';
+    return;
+  }
+  el.innerHTML = '';
+  const name = document.createElement('div');
+  name.className = 'persona-name';
+  name.textContent = p.name + (p.builtin ? '（内置）' : '');
+  el.appendChild(name);
+  const meta = document.createElement('div');
+  meta.className = 'persona-meta';
+  meta.textContent = `参与度：${PARTICIPATION_LABEL[p.participation] || p.participation}` +
+    (p.group_display_name ? ` · 群内展示名：${p.group_display_name}` : '') +
+    (p.system_override ? ' · 已覆盖系统提示词' : '');
+  el.appendChild(meta);
+  const role = document.createElement('div');
+  role.className = 'persona-role';
+  role.textContent = p.role_text || '（未填写角色设定）';
+  el.appendChild(role);
+}
+
+// 给 Bot 选人设：用现成的 member-checks 列表，避免再写一套选择器样式
+App.registerCommand('pick-bot-persona', async (botId) => {
+  const b = App.state.bots.find((x) => x.id === botId);
+  if (!b) return;
+  if (!App.state.personas.length) {
+    try { await loadPersonas(); } catch (e) { toast(e.message || '人设加载失败'); return; }
+  }
+  const overlay = document.createElement('div');
+  overlay.className = 'modal';
+  overlay.innerHTML = `
+    <div class="modal-box">
+      <h3>为「${escapeHtml(b.name)}」选择人设</h3>
+      <div class="modal-section-title">人设决定这个 Bot「是谁」；不选则只用 System Prompt</div>
+      <div class="member-checks" id="bp-list"></div>
+      <div class="modal-actions">
+        <button id="bp-cancel" class="btn-ghost">取消</button>
+        <button id="bp-ok" class="btn-primary">确定</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const list = overlay.querySelector('#bp-list');
+  const mk = (id, title, sub) => {
+    const lab = document.createElement('label');
+    lab.className = 'member-check';
+    lab.innerHTML =
+      `<input type="radio" name="bp-pick" value="${id}" ${id === (b.persona_id || 0) ? 'checked' : ''}>
+       <span class="member-name">${escapeHtml(title)}</span>`;
+    if (sub) {
+      const s = document.createElement('span');
+      s.className = 'label-hint';
+      s.textContent = sub;
+      lab.appendChild(s);
+    }
+    list.appendChild(lab);
+    return lab;
+  };
+  mk(0, '不绑定', '只用 System Prompt');
+  for (const p of App.state.personas) {
+    mk(p.id, p.name + (p.builtin ? '（内置）' : ''),
+       PARTICIPATION_LABEL[p.participation] || p.participation);
+  }
+  const close = () => overlay.remove();
+  overlay.querySelector('#bp-cancel').addEventListener('click', close);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector('#bp-ok').addEventListener('click', async () => {
+    const picked = overlay.querySelector('input[name="bp-pick"]:checked');
+    const pid = picked ? Number(picked.value) : 0;
+    try {
+      await App.api.put(`/api/v1/bots/${botId}/persona`, { persona_id: pid });
+    } catch (e) {
+      toast(e.message || '绑定失败');
+      return;
+    }
+    close();
+    await refreshBots();
+    renderBotDetail();
+    toast(pid ? '已绑定人设' : '已解除绑定');
+  });
 });
 
 /* ================= 群聊 ================= */
@@ -2326,6 +2588,12 @@ $('btn-bot-delete').addEventListener('click', () => {
   const b = App.state.bots.find((x) => x.id === App.state.selectedBotId);
   if (b) App.run('delete-bot', b.id);
 });
+$('btn-bot-persona-change').addEventListener('click', () => {
+  if (App.state.selectedBotId) App.run('pick-bot-persona', App.state.selectedBotId);
+});
+$('btn-persona-add').addEventListener('click', () => openPersonaModal(null));
+$('btn-persona-save').addEventListener('click', () => App.run('save-persona'));
+$('btn-persona-cancel')?.addEventListener('click', () => $('modal-persona').classList.add('hidden'));
 $('btn-settings-save').addEventListener('click', () => App.run('save-settings'));
 $('btn-settings-cancel').addEventListener('click', () => $('modal-settings').classList.add('hidden'));
 $('btn-bot-save').addEventListener('click', () => App.run('save-bot'));

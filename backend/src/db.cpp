@@ -73,8 +73,7 @@ CREATE TABLE IF NOT EXISTS groups (
   status     TEXT NOT NULL DEFAULT 'idle',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS group_members (
+);CREATE TABLE IF NOT EXISTS group_members (
   id       INTEGER PRIMARY KEY AUTOINCREMENT,
   group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
   bot_id   INTEGER NOT NULL REFERENCES bots(id),
@@ -113,6 +112,18 @@ CREATE TABLE IF NOT EXISTS reminders (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(done, due_at);
+CREATE TABLE IF NOT EXISTS personas_v2 (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  name                TEXT NOT NULL,
+  role_text           TEXT NOT NULL DEFAULT '',
+  admin_rules         TEXT NOT NULL DEFAULT '',
+  group_display_name  TEXT NOT NULL DEFAULT '',
+  participation       TEXT NOT NULL DEFAULT 'active',
+  system_override     TEXT NOT NULL DEFAULT '',
+  builtin             INTEGER NOT NULL DEFAULT 0,
+  created_at          TEXT NOT NULL,
+  updated_at          TEXT NOT NULL
+);
 )SQL";
 
 // group_messages 的 DDL 单独成常量：新库建表与旧库迁移重建共用同一段，
@@ -193,8 +204,9 @@ Bot rowToBot(sqlite3_stmt* st) {
   b.max_tokens = static_cast<int>(colInt(st, 10));
   b.api_type = colText(st, 11);
   b.avatar_path = colText(st, 12);
-  b.created_at = colText(st, 13);
-  b.updated_at = colText(st, 14);
+  b.persona_id = colInt(st, 13);
+  b.created_at = colText(st, 14);
+  b.updated_at = colText(st, 15);
   return b;
 }
 
@@ -290,6 +302,9 @@ bool open(const std::string& dbPath) {
     ensureBotCol("api_type",
                  "ALTER TABLE bots ADD COLUMN api_type TEXT NOT NULL DEFAULT 'openai'");
     ensureBotCol("avatar_path", "ALTER TABLE bots ADD COLUMN avatar_path TEXT");
+    // v0.6.1：Bot 绑定人设。0 = 未绑定，行为与 v0.6.0 完全一致。
+    ensureBotCol("persona_id",
+                 "ALTER TABLE bots ADD COLUMN persona_id INTEGER NOT NULL DEFAULT 0");
 
     // personas → bots 一次性迁移（幂等：bots 已有数据则跳过）
     bool hasBots = false;
@@ -334,6 +349,51 @@ bool open(const std::string& dbPath) {
       }
     }
     exec("UPDATE groups SET status='idle'");
+
+    // v0.6.1：内置人设种子。幂等——只在表为空时插入，
+    // 用户删掉某个内置人设后不会在下次启动又冒出来。
+    bool hasPersona = false;
+    query("SELECT COUNT(*) FROM personas_v2", {},
+          [&](sqlite3_stmt* st) { hasPersona = colInt(st, 0) > 0; });
+    if (!hasPersona) {
+      auto seed = [&](const std::string& name, const std::string& role,
+                      const std::string& rules, const std::string& display,
+                      const std::string& part) {
+        Persona p;
+        p.name = name;
+        p.role_text = role;
+        p.admin_rules = rules;
+        p.group_display_name = display;
+        p.participation = part;
+        p.builtin = true;
+        createPersona(p);   // recursive_mutex 可重入
+      };
+      seed("温暖陪伴",
+           "# 角色：温暖陪伴\n"
+           "你是用户身边一个稳定、温和的存在。说话自然口语化，不用书面腔，"
+           "也不刻意卖萌。\n"
+           "> 你会记得用户提过的事，并在合适的时候自然地提起；\n"
+           "> 不追问用户不想说的细节；\n"
+           "> 情绪低落时先接住情绪，而不是急着给建议。",
+           "回复保持简洁，通常 2–4 句。除非用户要求展开，不要长篇大论。",
+           "", "active");
+      seed("理性顾问",
+           "# 角色：理性顾问\n"
+           "你擅长把复杂问题拆成可执行的步骤。先给结论，再给理由，"
+           "必要时用列表。\n"
+           "> 不确定的地方明确说「不确定」，不要编造；\n"
+           "> 会指出用户方案里的风险，但不居高临下。",
+           "涉及事实性内容时，宁可承认不知道，也不要给出听起来合理但未经验证的说法。",
+           "", "moderate");
+      seed("活跃群友",
+           "# 角色：活跃群友\n"
+           "你在群聊里像个真实的朋友：会接梗、会吐槽、会顺着话题聊下去。\n"
+           "> 群聊是多人的，不要长篇独白，一般 1–3 句；\n"
+           "> 别人说话时不要抢话，也不要每次都表态；\n"
+           "> 不确定大家在聊什么就先听，别硬猜。",
+           "群聊中不要重复别人已经说过的内容；话题与你无关时可以少说话。",
+           "", "active");
+    }
     return true;
   } catch (const std::exception& e) {
     logx::error(std::string("db init failed: ") + e.what());
@@ -442,12 +502,13 @@ Bot createBot(const Bot& b) {
   std::lock_guard<std::recursive_mutex> lock(g_mtx);
   std::string ts = nowIso();
   execute("INSERT INTO bots(name,avatar,greeting,system_prompt,temperature,is_enabled,"
-          "api_base_url,api_key_enc,api_model,max_tokens,api_type,avatar_path,"
-          "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          "api_base_url,api_key_enc,api_model,max_tokens,api_type,avatar_path,persona_id,"
+          "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
           {b.name, b.avatar, b.greeting, b.system_prompt,
            std::to_string(b.temperature), b.is_enabled ? "1" : "0",
            b.api_base_url, b.api_key_enc, b.api_model,
-           std::to_string(b.max_tokens), b.api_type, b.avatar_path, ts, ts});
+           std::to_string(b.max_tokens), b.api_type, b.avatar_path,
+           std::to_string(b.persona_id), ts, ts});
   Bot out = b;
   out.id = sqlite3_last_insert_rowid(g_db);
   out.created_at = out.updated_at = ts;
@@ -458,12 +519,12 @@ bool updateBot(const Bot& b) {
   std::lock_guard<std::recursive_mutex> lock(g_mtx);
   execute("UPDATE bots SET name=?,avatar=?,greeting=?,system_prompt=?,temperature=?,"
           "is_enabled=?,api_base_url=?,api_key_enc=?,api_model=?,max_tokens=?,"
-          "api_type=?,avatar_path=?,updated_at=? WHERE id=?",
+          "api_type=?,avatar_path=?,persona_id=?,updated_at=? WHERE id=?",
           {b.name, b.avatar, b.greeting, b.system_prompt,
            std::to_string(b.temperature), b.is_enabled ? "1" : "0",
            b.api_base_url, b.api_key_enc, b.api_model,
            std::to_string(b.max_tokens), b.api_type, b.avatar_path,
-           nowIso(), std::to_string(b.id)});
+           std::to_string(b.persona_id), nowIso(), std::to_string(b.id)});
   return sqlite3_changes(g_db) > 0;
 }
 
@@ -484,7 +545,7 @@ std::vector<Bot> listBots() {
   std::lock_guard<std::recursive_mutex> lock(g_mtx);
   std::vector<Bot> out;
   query("SELECT id,name,avatar,greeting,system_prompt,temperature,is_enabled,"
-        "api_base_url,api_key_enc,api_model,max_tokens,api_type,avatar_path,"
+        "api_base_url,api_key_enc,api_model,max_tokens,api_type,avatar_path,persona_id,"
         "created_at,updated_at FROM bots ORDER BY id ASC",
         {}, [&](sqlite3_stmt* st) { out.push_back(rowToBot(st)); });
   return out;
@@ -494,7 +555,7 @@ std::optional<Bot> getBot(int64_t id) {
   std::lock_guard<std::recursive_mutex> lock(g_mtx);
   std::optional<Bot> out;
   query("SELECT id,name,avatar,greeting,system_prompt,temperature,is_enabled,"
-        "api_base_url,api_key_enc,api_model,max_tokens,api_type,avatar_path,"
+        "api_base_url,api_key_enc,api_model,max_tokens,api_type,avatar_path,persona_id,"
         "created_at,updated_at FROM bots WHERE id=?",
         {std::to_string(id)},
         [&](sqlite3_stmt* st) { out = rowToBot(st); });
@@ -520,7 +581,7 @@ std::optional<Bot> getDefaultBot() {
   }
   std::optional<Bot> out;
   query("SELECT id,name,avatar,greeting,system_prompt,temperature,is_enabled,"
-        "api_base_url,api_key_enc,api_model,max_tokens,api_type,avatar_path,"
+        "api_base_url,api_key_enc,api_model,max_tokens,api_type,avatar_path,persona_id,"
         "created_at,updated_at FROM bots ORDER BY id ASC LIMIT 1",
         {}, [&](sqlite3_stmt* st) { out = rowToBot(st); });
   return out;
@@ -869,6 +930,108 @@ bool markReminderDone(int64_t id) {
   std::lock_guard<std::recursive_mutex> lock(g_mtx);
   execute("UPDATE reminders SET done=1 WHERE id=?", {std::to_string(id)});
   return sqlite3_changes(g_db) > 0;
+}
+
+/* ---------------- v0.6.1 人设 ---------------- */
+
+Persona rowToPersona(sqlite3_stmt* st) {
+  Persona p;
+  p.id = colInt(st, 0);
+  p.name = colText(st, 1);
+  p.role_text = colText(st, 2);
+  p.admin_rules = colText(st, 3);
+  p.group_display_name = colText(st, 4);
+  p.participation = colText(st, 5);
+  p.system_override = colText(st, 6);
+  p.builtin = colInt(st, 7) != 0;
+  p.created_at = colText(st, 8);
+  p.updated_at = colText(st, 9);
+  return p;
+}
+
+std::vector<Persona> listPersonas() {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  std::vector<Persona> out;
+  query("SELECT id,name,role_text,admin_rules,group_display_name,participation,"
+        "system_override,builtin,created_at,updated_at FROM personas_v2 ORDER BY id ASC",
+        {}, [&](sqlite3_stmt* st) { out.push_back(rowToPersona(st)); });
+  return out;
+}
+
+std::optional<Persona> getPersona(int64_t id) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  std::optional<Persona> out;
+  query("SELECT id,name,role_text,admin_rules,group_display_name,participation,"
+        "system_override,builtin,created_at,updated_at FROM personas_v2 WHERE id=?",
+        {std::to_string(id)},
+        [&](sqlite3_stmt* st) { out = rowToPersona(st); });
+  return out;
+}
+
+Persona createPersona(const Persona& p) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  std::string ts = nowIso();
+  execute("INSERT INTO personas_v2(name,role_text,admin_rules,group_display_name,"
+          "participation,system_override,builtin,created_at,updated_at) "
+          "VALUES(?,?,?,?,?,?,?,?,?)",
+          {p.name, p.role_text, p.admin_rules, p.group_display_name,
+           p.participation.empty() ? "active" : p.participation,
+           p.system_override, p.builtin ? "1" : "0", ts, ts});
+  Persona out = p;
+  out.id = sqlite3_last_insert_rowid(g_db);
+  out.created_at = out.updated_at = ts;
+  return out;
+}
+
+bool updatePersona(const Persona& p) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  execute("UPDATE personas_v2 SET name=?,role_text=?,admin_rules=?,group_display_name=?,"
+          "participation=?,system_override=?,updated_at=? WHERE id=?",
+          {p.name, p.role_text, p.admin_rules, p.group_display_name,
+           p.participation.empty() ? "active" : p.participation,
+           p.system_override, nowIso(), std::to_string(p.id)});
+  return sqlite3_changes(g_db) > 0;
+}
+
+bool deletePersona(int64_t id) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  // 内置人设不可删：用户可能正依赖它的默认行为，删掉会静默改变对话风格
+  auto p = getPersona(id);   // recursive_mutex 可重入
+  if (!p || p->builtin) return false;
+  // 解绑引用，避免 Bot 指向已不存在的人设
+  execute("UPDATE bots SET persona_id=0 WHERE persona_id=?", {std::to_string(id)});
+  execute("DELETE FROM personas_v2 WHERE id=?", {std::to_string(id)});
+  return sqlite3_changes(g_db) > 0;
+}
+
+bool setBotPersona(int64_t botId, int64_t personaId) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  execute("UPDATE bots SET persona_id=?, updated_at=? WHERE id=?",
+          {std::to_string(personaId), nowIso(), std::to_string(botId)});
+  return sqlite3_changes(g_db) > 0;
+}
+
+std::string applyPersonaToPrompt(const std::string& basePrompt, int64_t personaId) {
+  if (personaId <= 0) return basePrompt;
+  auto p = getPersona(personaId);
+  if (!p) return basePrompt;
+
+  // 高级用法：整体替换。此时角色设定/附加规则都不参与，避免出现
+  // 「以为覆盖了、其实还混进了别的规则」这种难以排查的行为。
+  if (!p->system_override.empty()) return p->system_override;
+
+  std::string out;
+  if (!p->role_text.empty()) out += p->role_text;
+  if (!p->admin_rules.empty()) {
+    if (!out.empty()) out += "\n\n";
+    out += "[附加规则]\n" + p->admin_rules;
+  }
+  if (!basePrompt.empty()) {
+    if (!out.empty()) out += "\n\n";
+    out += basePrompt;
+  }
+  // 人设内容全空时退回原提示词，避免把系统提示变成空串
+  return out.empty() ? basePrompt : out;
 }
 
 }  // namespace db
