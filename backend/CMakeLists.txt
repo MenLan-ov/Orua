@@ -46,6 +46,7 @@ add_executable(backend_tests
   tests/test_memory_service.cpp
   tests/test_v5.cpp
   tests/test_v052.cpp
+  tests/test_v053.cpp
   src/db.cpp
   src/config.cpp
   src/dpapi_util.cpp

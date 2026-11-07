@@ -214,6 +214,7 @@ const App = {
     pluginBotId: null,
     plugins: [],
     pluginEvents: [],
+    pluginSearch: '',
     editingPlugin: null,
     detached: false,
     detachedTarget: null,
@@ -281,11 +282,12 @@ async function switchView(view) {
     try {
       await loadSkills();
       await loadPlugins();
+      // 技能开关是按 Bot 存的，必须先拿到当前 Bot 的技能状态再渲染
       if (App.state.pluginBotId) await loadBotSkills(App.state.pluginBotId);
     } catch (e) {
       toast(e.message || '技能加载失败');
     }
-    renderBotSkills();
+    renderPluginPage();
   }
 }
 
@@ -1507,19 +1509,282 @@ function newSkillJob(readSkills) {
 async function loadSkills() {
   const res = await App.api.get('/api/v1/skills');
   App.state.skills = res.skills || [];
-  renderSkillCards();
+  renderPluginPage();
 }
-function renderSkillCards() {
-  const el = $('skills-list');
-  el.innerHTML = '';
-  for (const s of App.state.skills) {
-    const card = document.createElement('div');
-    card.className = 'skill-card';
-    card.innerHTML = `<h4>${escapeHtml(s.name)}</h4><p>${escapeHtml(s.description)}</p>`;
-    el.appendChild(card);
+
+/* ================= 插件页（v0.5.3 按参考图重做） =================
+   结构：分组 → 卡片。每张卡：标题行（名称 + 版本/标签 + 操作按钮）→
+   能力标签网格 → 描述。齿轮打开参数弹窗（插件＝订阅事件/生效 Bot/启用；
+   技能＝默认参数）。↑ 把插件上移（分发顺序即列表顺序）。 */
+
+/* 图标用内联 SVG：⚙/↑ 这类字符在 WebView2 里常被渲染成小圆点或方向怪异的箭头，
+   看不出含义。SVG 尺寸可控，也不受字体回退影响。 */
+const ICON_GEAR = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/>' +
+  '<path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3' +
+  ' 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1' +
+  'a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1' +
+  'a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3' +
+  'H10a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1' +
+  'a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V10a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1' +
+  'a1.6 1.6 0 0 0-1.5 1z"/></svg>';
+const ICON_UP = '<svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
+const ICON_X = '<svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>';
+
+function pluginMatchesSearch(p) {
+  const q = (App.state.pluginSearch || '').trim().toLowerCase();
+  if (!q) return true;
+  return (p.name || '').toLowerCase().includes(q) ||
+         (p.url || '').toLowerCase().includes(q) ||
+         (p.events || []).some((e) => e.toLowerCase().includes(q));
+}
+
+function skillMatchesSearch(s) {
+  const q = (App.state.pluginSearch || '').trim().toLowerCase();
+  if (!q) return true;
+  return (s.name || '').toLowerCase().includes(q) ||
+         (s.id || '').toLowerCase().includes(q) ||
+         (s.description || '').toLowerCase().includes(q);
+}
+
+function renderPluginPage() {
+  const root = $('plugin-groups');
+  if (!root) return;
+  root.innerHTML = '';
+
+  const bots = App.state.bots || [];
+  const botId = App.state.pluginBotId || (bots[0] ? bots[0].id : null);
+  const skills = (App.state.skills || []).filter(skillMatchesSearch);
+  const plugins = (App.state.plugins || []).filter(pluginMatchesSearch);
+  // 技能状态是否已从服务端确认。未确认时禁用勾选，避免用空集合覆盖已有配置。
+  const skillsLoaded = botId ? botSkillsLoaded.has(botId) : false;
+
+  // 计数徽章：生效数 / 总数。技能按「当前 Bot 已启用」算，插件按 enabled。
+  const enabledSkillCount = (() => {
+    if (!botId) return 0;
+    const list = App.state.botSkills[botId] || [];
+    return list.filter((x) => x.enabled).length;
+  })();
+  const totalSkills = (App.state.skills || []).length;
+  const enabledPlugins = (App.state.plugins || []).filter((p) => p.enabled !== false).length;
+  const totalPlugins = (App.state.plugins || []).length;
+  const badge = $('plugins-badge');
+  if (badge) {
+    badge.textContent = `${enabledSkillCount + enabledPlugins} / ${totalSkills + totalPlugins} 生效`;
+    badge.classList.toggle('warn', enabledSkillCount + enabledPlugins === 0);
   }
-  const cnt = $('skills-count');
-  if (cnt) cnt.textContent = `${App.state.skills.length} 个`;
+
+  /* ---- 分组 1：内置技能 ---- */
+  const gSkill = document.createElement('div');
+  gSkill.className = 'plugin-group';
+  gSkill.id = 'plugin-group-skills';
+  const skillHint = bots.length
+    ? `以下技能由核心代码调用，勾选即对「${escapeHtml(
+        (bots.find((b) => b.id === botId) || {}).name || '当前 Bot')}」生效`
+    : '还没有 Bot，先去「Bot」页创建一个';
+  gSkill.innerHTML = `<div class="plugin-group-head">
+      <h3>内置技能</h3><span class="plugin-group-count">${skills.length} 个</span>
+    </div>
+    <div class="plugin-intro">${skillHint}</div>`;
+
+  // Bot 选择器：技能开关与参数都是按 Bot 存的。
+  // 用 createElement 组装而不是拼 innerHTML —— 后面的代码要直接持有这个节点。
+  const pickerWrap = document.createElement('div');
+  pickerWrap.className = 'bot-skill-picker';
+  const picker = document.createElement('select');
+  picker.id = 'skill-bot-select';
+  for (const b of bots) {
+    const o = document.createElement('option');
+    o.value = b.id;
+    o.textContent = b.name;
+    if (b.id === botId) o.selected = true;
+    picker.appendChild(o);
+  }
+  picker.addEventListener('change', async (e) => {
+    App.state.pluginBotId = Number(e.target.value);
+    try {
+      await loadBotSkills(App.state.pluginBotId);
+    } catch (err) {
+      toast(err.message || '技能加载失败');
+    }
+  });
+  pickerWrap.appendChild(picker);
+  gSkill.appendChild(pickerWrap);
+
+  // 技能开关行的容器：v0.5.2 时这些 input 直接挂在 #bot-skills-list 下，
+  // v0.5.3 改成卡片布局后仍保留这个 id，便于外部脚本/测试按稳定锚点定位。
+  const skillRows = document.createElement('div');
+  skillRows.id = 'bot-skills-list';
+  gSkill.appendChild(skillRows);
+
+  if (!skills.length) {
+    gSkill.insertAdjacentHTML('beforeend',
+      `<div class="plugin-empty">${App.state.pluginSearch ? '没有匹配的技能' : '暂无内置技能'}</div>`);
+  }
+  for (const s of skills) {
+    const on = botId
+      ? (App.state.botSkills[botId] || []).some((x) => x.skill_id === s.id && x.enabled)
+      : false;
+    const card = document.createElement('div');
+    card.className = 'plugin-card' + (on ? '' : ' disabled');
+
+    const head = document.createElement('div');
+    head.className = 'plugin-card-head';
+    head.innerHTML = `<span class="plugin-card-name">${escapeHtml(s.name)}</span>
+      <span class="plugin-card-tag${on ? ' on' : ' off'}">${on ? '已启用' : '未启用'}</span>
+      <span class="plugin-card-spacer"></span>`;
+
+    // 勾选框与齿轮用 createElement 建：stub DOM 里 innerHTML 里的 <input> 不会
+    // 建立真正的父子链，data-skill-on 之类的属性也就查不到。
+    const chkLabel = document.createElement('label');
+    chkLabel.className = 'chk';
+    chkLabel.style.margin = '0';
+    chkLabel.style.fontSize = '11.5px';
+    const chk = document.createElement('input');
+    chk.type = 'checkbox';
+    chk.dataset.skill = s.id;
+    chk.checked = on;
+    // 状态未确认（GET 失败）时禁用：否则用户一勾就会用「空集合」覆盖服务端已有技能
+    chk.disabled = !skillsLoaded;
+    chk.addEventListener('change', (e) => toggleSkill(botId, s.id, e.target.checked));
+    chkLabel.appendChild(chk);
+    chkLabel.appendChild(document.createTextNode(' 启用'));
+    head.appendChild(chkLabel);
+
+    const gear = document.createElement('button');
+    gear.className = 'icon-btn';
+    gear.dataset.skillGear = s.id;
+    gear.title = '参数设置';
+    gear.innerHTML = ICON_GEAR;
+    gear.disabled = !skillsLoaded;
+    gear.addEventListener('click', () => openSkillModal(s.id));
+    head.appendChild(gear);
+    card.appendChild(head);
+
+    const abilities = document.createElement('div');
+    abilities.className = 'plugin-abilities';
+    const pill = document.createElement('span');
+    pill.className = 'plugin-ability' + (on ? ' on' : '');
+    pill.textContent = s.id;
+    abilities.appendChild(pill);
+    card.appendChild(abilities);
+
+    const desc = document.createElement('p');
+    desc.className = 'plugin-card-desc';
+    desc.textContent = s.description || '';
+    card.appendChild(desc);
+
+    skillRows.appendChild(card);
+  }
+  root.appendChild(gSkill);
+
+  /* ---- 分组 2：自制插件 ---- */
+  const gPlugin = document.createElement('div');
+  gPlugin.className = 'plugin-group';
+  gPlugin.innerHTML = `<div class="plugin-group-head">
+      <h3>自制插件</h3><span class="plugin-group-count">${plugins.length} 个</span>
+    </div>
+    <div class="plugin-intro">
+      把 Orua 的事件 POST 到你自己的 Webhook 地址。可用事件：
+      <code>chat.completed</code> / <code>chat.error</code> /
+      <code>session.created</code> / <code>session.deleted</code>。
+      齿轮里可以改订阅事件、限定生效 Bot、临时停用。
+    </div>`;
+
+  if (!plugins.length) {
+    gPlugin.insertAdjacentHTML('beforeend',
+      `<div class="plugin-empty">${App.state.pluginSearch
+        ? '没有匹配的插件'
+        : '还没有自制插件。点右上角「+ 添加插件」，填一个 Webhook 地址即可接入。'}</div>`);
+  }
+  plugins.forEach((p, idx) => {
+    const on = p.enabled !== false;
+    const botNames = (p.bot_ids || []).length
+      ? p.bot_ids.map((id) => (bots.find((b) => b.id === id) || {}).name || `#${id}`).join('、')
+      : '全部 Bot';
+    const card = document.createElement('div');
+    card.className = 'plugin-card' + (on ? '' : ' disabled');
+
+    const head = document.createElement('div');
+    head.className = 'plugin-card-head';
+    head.innerHTML = `<span class="plugin-card-name">${escapeHtml(p.name)}</span>
+      <span class="plugin-card-tag${on ? ' on' : ' off'}">${on ? '生效中' : '已停用'}</span>
+      <span class="plugin-card-spacer"></span>`;
+
+    // 三个图标按钮用 createElement 建，保证 dataset / disabled 在 stub DOM 里也可查
+    const mkBtn = (datasetKey, title, icon, cls) => {
+      const btn = document.createElement('button');
+      btn.className = 'icon-btn' + (cls ? ' ' + cls : '');
+      btn.dataset[datasetKey] = p.name;
+      btn.title = title;
+      btn.innerHTML = icon;
+      return btn;
+    };
+    const up = mkBtn('pluginUp', '上移', ICON_UP);
+    up.disabled = idx === 0;
+    up.addEventListener('click', () => movePluginUp(p.name));
+    head.appendChild(up);
+
+    const gear = mkBtn('pluginGear', '参数设置', ICON_GEAR);
+    gear.addEventListener('click', () => openPluginModal(p.name));
+    head.appendChild(gear);
+
+    const del = mkBtn('pluginDel', '删除', ICON_X, 'danger');
+    del.addEventListener('click', () => deletePlugin(p.name));
+    head.appendChild(del);
+    card.appendChild(head);
+
+    const abilities = document.createElement('div');
+    abilities.className = 'plugin-abilities';
+    const evs = (p.events || []).length ? p.events : ['未订阅事件'];
+    for (const ev of evs) {
+      const pill = document.createElement('span');
+      pill.className = 'plugin-ability' + (on && (p.events || []).length ? ' on' : '');
+      pill.textContent = ev;
+      abilities.appendChild(pill);
+    }
+    card.appendChild(abilities);
+
+    const desc = document.createElement('p');
+    desc.className = 'plugin-card-desc';
+    desc.textContent = `${p.url} · 生效范围：${botNames}`;
+    card.appendChild(desc);
+
+    gPlugin.appendChild(card);
+  });
+  root.appendChild(gPlugin);
+
+  /* ---- 事件绑定（技能卡的勾选框/齿轮在创建时已绑好，这里只处理插件卡）---- */
+  root.querySelectorAll('[data-plugin-gear]').forEach((b) =>
+    b.addEventListener('click', () => openPluginModal(b.dataset.pluginGear)));
+  root.querySelectorAll('[data-plugin-del]').forEach((b) =>
+    b.addEventListener('click', () => deletePlugin(b.dataset.pluginDel)));
+  root.querySelectorAll('[data-plugin-up]').forEach((b) =>
+    b.addEventListener('click', () => movePluginUp(b.dataset.pluginUp)));
+}
+
+async function toggleSkill(botId, skillId, checked) {
+  if (!botId) { toast('请先创建 Bot'); return; }
+  if (!botSkillsLoaded.has(botId)) {
+    // 状态未确认时不该发写请求：那等于拿一份空集合去覆盖服务端已有技能
+    toast('技能状态未确认，已取消保存');
+    renderPluginPage();
+    return;
+  }
+  const list = App.state.botSkills[botId] || [];
+  const next = list.filter((x) => x.skill_id !== skillId);
+  if (checked) next.push({ skill_id: skillId, enabled: true });
+  App.state.botSkills[botId] = next;
+  try {
+    await submitBotSkills(botId, () => (App.state.botSkills[botId] || [])
+      .filter((x) => x.enabled).map((x) => ({ skill_id: x.skill_id, enabled: true })));
+    toast('技能已保存');
+  } catch (err) {
+    toast(err.message || '技能保存失败');
+    // PUT 失败即撤销信任：服务端集合现在不可知，继续允许勾选会拿本地缓存去覆盖它。
+    // 让行转禁用，用户点「刷新」重新拉一次再操作。
+    botSkillsLoaded.delete(botId);
+  }
+  renderPluginPage();
 }
 
 /* ================= 自制插件（Webhook） ================= */
@@ -1527,54 +1792,20 @@ async function loadPlugins() {
   const res = await App.api.get('/api/v1/plugins');
   App.state.plugins = res.plugins || [];
   App.state.pluginEvents = res.available_events || [];
-  renderPlugins();
-}
-function renderPlugins() {
-  const el = $('plugins-list');
-  if (!el) return;
-  el.innerHTML = '';
-  const cnt = $('plugins-count');
-  if (cnt) cnt.textContent = `${App.state.plugins.length} 个`;
-
-  if (!App.state.plugins.length) {
-    el.innerHTML = '<div class="plugin-empty">还没有自制插件。点右上角「+ 添加插件」，' +
-      '填一个 Webhook 地址即可接入。</div>';
-    return;
-  }
-
-  for (const p of App.state.plugins) {
-    const row = document.createElement('div');
-    row.className = 'plugin-row';
-    const events = (p.events || []).length
-      ? p.events.map((e) => `<span class="plugin-event-tag">${escapeHtml(e)}</span>`).join('')
-      : '<span class="plugin-event-tag">未订阅事件</span>';
-    row.innerHTML = `<div class="plugin-row-main">
-        <div class="plugin-row-name">${escapeHtml(p.name)}</div>
-        <div class="plugin-row-url" title="${escapeHtml(p.url)}">${escapeHtml(p.url)}</div>
-        <div class="plugin-row-events">${events}</div>
-      </div>
-      <div class="plugin-row-actions">
-        <button class="btn-ghost btn-sm" data-plugin-edit="${escapeHtml(p.name)}">编辑</button>
-        <button class="btn-ghost btn-sm" data-plugin-del="${escapeHtml(p.name)}">删除</button>
-      </div>`;
-    el.appendChild(row);
-  }
-
-  el.querySelectorAll('[data-plugin-edit]').forEach((b) =>
-    b.addEventListener('click', () => openPluginModal(b.dataset.pluginEdit)));
-  el.querySelectorAll('[data-plugin-del]').forEach((b) =>
-    b.addEventListener('click', () => deletePlugin(b.dataset.pluginDel)));
+  renderPluginPage();
 }
 
 function openPluginModal(name) {
   const editing = name ? App.state.plugins.find((p) => p.name === name) : null;
   App.state.editingPlugin = editing ? editing.name : null;
-  $('plugin-modal-title').textContent = editing ? '编辑插件' : '添加插件';
+  $('plugin-modal-title').textContent = editing ? '插件设置' : '添加插件';
   $('plugin-name').value = editing ? editing.name : '';
   $('plugin-url').value = editing ? editing.url : '';
+  $('plugin-enabled').checked = editing ? editing.enabled !== false : true;
   $('plugin-form-error').classList.add('hidden');
+  $('plugin-test-result').classList.add('hidden');
 
-  // 事件多选：首次打开时按后端返回的 available_events 生成，之后复用节点避免丢勾选
+  // 事件多选
   const evEl = $('plugin-events');
   const events = App.state.pluginEvents.length
     ? App.state.pluginEvents
@@ -1588,8 +1819,56 @@ function openPluginModal(name) {
       ${selected.has(ev) ? 'checked' : ''}> ${escapeHtml(ev)}`;
     evEl.appendChild(lab);
   }
+
+  // 生效 Bot 多选：不勾 = 全部 Bot（与后端空数组语义一致）
+  const botEl = $('plugin-bots');
+  const picked = new Set(editing ? editing.bot_ids || [] : []);
+  botEl.innerHTML = '';
+  for (const b of App.state.bots || []) {
+    const lab = document.createElement('label');
+    lab.className = 'member-check';
+    lab.innerHTML = `<input type="checkbox" data-bot="${b.id}"
+      ${picked.has(b.id) ? 'checked' : ''}> ${escapeHtml(b.name)}`;
+    botEl.appendChild(lab);
+  }
+  if (!(App.state.bots || []).length) {
+    botEl.innerHTML = '<div class="plugin-empty" style="padding:8px 0">还没有 Bot</div>';
+  }
+
   $('modal-plugin').classList.remove('hidden');
   $('plugin-name').focus();
+}
+
+async function testPluginConnection() {
+  const url = $('plugin-url').value.trim();
+  const box = $('plugin-test-result');
+  const btn = $('btn-plugin-test');
+  box.classList.add('hidden');
+
+  if (!/^https?:\/\/.+/.test(url)) {
+    box.textContent = 'Webhook 地址必须以 http:// 或 https:// 开头';
+    box.className = 'test-result bad';
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = '测试中…';
+  try {
+    const r = await App.api.post('/api/v1/plugins/test', { url });
+    if (r.ok) {
+      box.textContent = `✓ ${r.detail}（${r.elapsed_ms}ms）`;
+      box.className = 'test-result ok';
+    } else {
+      box.textContent = `✗ ${r.detail}${r.elapsed_ms ? `（${r.elapsed_ms}ms）` : ''}`;
+      box.className = 'test-result bad';
+    }
+  } catch (e) {
+    box.textContent = `✗ ${e.message || '测试失败'}`;
+    box.className = 'test-result bad';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '测试连接';
+    box.classList.remove('hidden');
+  }
 }
 
 async function savePlugin() {
@@ -1597,9 +1876,11 @@ async function savePlugin() {
   const url = $('plugin-url').value.trim();
   const events = [...$('plugin-events').querySelectorAll('input:checked')]
     .map((c) => c.dataset.event);
+  const botIds = [...$('plugin-bots').querySelectorAll('input:checked')]
+    .map((c) => Number(c.dataset.bot));
+  const enabled = $('plugin-enabled').checked;
   const errEl = $('plugin-form-error');
 
-  // 前端先做一遍同样的校验，省一次往返；后端仍有权威校验
   let err = '';
   if (!name) err = '插件名称不能为空';
   else if (!/^https?:\/\/.+/.test(url)) err = 'Webhook 地址必须以 http:// 或 https:// 开头';
@@ -1613,7 +1894,7 @@ async function savePlugin() {
   const btn = $('btn-plugin-save');
   btn.disabled = true;
   try {
-    await App.api.post('/api/v1/plugins', { name, url, events });
+    await App.api.post('/api/v1/plugins', { name, url, events, bot_ids: botIds, enabled });
     $('modal-plugin').classList.add('hidden');
     toast('插件已保存');
     await loadPlugins();
@@ -1635,6 +1916,128 @@ async function deletePlugin(name) {
     toast(e.message || '删除失败');
   }
 }
+
+// 上移：列表顺序就是分发顺序，把常看的放前面。整表重排后回写。
+async function movePluginUp(name) {
+  const list = [...App.state.plugins];
+  const i = list.findIndex((p) => p.name === name);
+  if (i <= 0) return;
+  [list[i - 1], list[i]] = [list[i], list[i - 1]];
+  try {
+    await App.api.post('/api/v1/plugins/reorder', { order: list.map((p) => p.name) });
+    await loadPlugins();
+  } catch (e) {
+    toast(e.message || '排序失败');
+  }
+}
+
+/* ================= 技能参数弹窗（齿轮） ================= */
+let editingSkillId = null;
+
+function openSkillModal(skillId) {
+  const s = (App.state.skills || []).find((x) => x.id === skillId);
+  if (!s) return;
+  editingSkillId = skillId;
+  const botId = App.state.pluginBotId;
+  const bot = (App.state.bots || []).find((b) => b.id === botId);
+  $('skill-modal-title').textContent = `技能参数：${s.name}`;
+  $('skill-modal-desc').textContent =
+    `为「${bot ? bot.name : '当前 Bot'}」配置 ${s.id} 的默认参数。` +
+    '模型调用时未提供的字段会用这里的值补上；模型显式传入的同名参数优先。';
+  $('skill-form-error').classList.add('hidden');
+
+  // 已保存的值
+  const saved = (App.state.botSkills[botId] || [])
+    .find((x) => x.skill_id === skillId)?.params || {};
+
+  const form = $('skill-params-form');
+  form.innerHTML = '';
+  const props = (s.params_schema && s.params_schema.properties) || {};
+  const keys = Object.keys(props);
+  if (!keys.length) {
+    form.innerHTML = '<div class="plugin-empty">该技能没有可配置的参数</div>';
+  }
+  for (const k of keys) {
+    const spec = props[k] || {};
+    const type = spec.type || 'string';
+    const wrap = document.createElement('div');
+    wrap.className = 'param-field';
+    const label = document.createElement('label');
+    label.textContent = k;
+    wrap.appendChild(label);
+
+    let input;
+    if (type === 'boolean') {
+      wrap.className = 'param-field chk-row';
+      input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = saved[k] === true;
+      label.classList.add('chk');
+      wrap.insertBefore(input, label);
+    } else {
+      input = document.createElement('input');
+      input.type = type === 'number' || type === 'integer' ? 'number' : 'text';
+      if (saved[k] !== undefined && saved[k] !== null) input.value = String(saved[k]);
+      wrap.appendChild(input);
+    }
+    input.dataset.paramKey = k;
+    input.dataset.paramType = type;
+    if (spec.description) {
+      const d = document.createElement('div');
+      d.className = 'param-desc';
+      d.textContent = spec.description;
+      wrap.appendChild(d);
+    }
+    form.appendChild(wrap);
+  }
+  $('modal-skill').classList.remove('hidden');
+}
+
+async function saveSkillParams() {
+  if (!editingSkillId) return;
+  const botId = App.state.pluginBotId;
+  const errEl = $('skill-form-error');
+  const params = {};
+  for (const input of $('skill-params-form').querySelectorAll('[data-param-key]')) {
+    const k = input.dataset.paramKey;
+    const t = input.dataset.paramType;
+    if (t === 'boolean') {
+      params[k] = input.checked;
+      continue;
+    }
+    const v = input.value.trim();
+    if (v === '') continue;  // 空 = 不设默认值
+    if (t === 'number' || t === 'integer') {
+      const n = Number(v);
+      if (Number.isNaN(n)) {
+        errEl.textContent = `参数 ${k} 必须是数字`;
+        errEl.classList.remove('hidden');
+        return;
+      }
+      params[k] = t === 'integer' ? Math.trunc(n) : n;
+    } else {
+      params[k] = v;
+    }
+  }
+  errEl.classList.add('hidden');
+
+  const btn = $('btn-skill-save');
+  btn.disabled = true;
+  try {
+    await App.api.put(`/api/v1/bots/${botId}/skills/${editingSkillId}/params`, { params });
+    // 同步本地缓存，避免重开弹窗时回填旧值
+    const list = App.state.botSkills[botId] || [];
+    const hit = list.find((x) => x.skill_id === editingSkillId);
+    if (hit) hit.params = params;
+    $('modal-skill').classList.add('hidden');
+    toast('参数已保存');
+  } catch (e) {
+    errEl.textContent = e.message || '保存失败';
+    errEl.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+  }
+}
 async function loadBotSkills(botId) {
   botSkillsLoaded.delete(botId);
   try {
@@ -1643,7 +2046,7 @@ async function loadBotSkills(botId) {
     skillWriteState(botId).trusted = App.state.botSkills[botId];
     botSkillsLoaded.add(botId);
   } finally {
-    renderBotSkills();
+    renderPluginPage();
   }
 }
 function submitBotSkills(botId, readSkills) {
@@ -1683,47 +2086,6 @@ async function runSkillSubmits(botId, st) {
     st.running = false;
   }
 }
-function renderBotSkills() {
-  const sel = $('skill-bot-select');
-  sel.innerHTML = '';
-  for (const b of App.state.bots) {
-    const o = document.createElement('option');
-    o.value = b.id;
-    o.textContent = b.name;
-    if (b.id === App.state.pluginBotId) o.selected = true;
-    sel.appendChild(o);
-  }
-  const id = App.state.pluginBotId;
-  const el = $('bot-skills-list');
-  el.innerHTML = '';
-  if (!id) return;
-  const loaded = botSkillsLoaded.has(id);
-  const enabled = new Map((App.state.botSkills[id] || []).map((s) => [s.skill_id, s.enabled]));
-  for (const s of App.state.skills) {
-    const row = document.createElement('label');
-    row.className = 'bot-skill-row';
-    const on = enabled.get(s.id) ?? false;
-    row.innerHTML = `<span>${escapeHtml(s.name)}</span>
-      <input type="checkbox" data-skill="${escapeHtml(s.id)}" ${on ? 'checked' : ''}${loaded ? '' : ' disabled'}>`;
-    if (loaded) {
-      row.querySelector('input').addEventListener('change', async (e) => {
-        const next = (App.state.botSkills[id] || []).filter((x) => x.skill_id !== s.id);
-        if (e.target.checked) next.push({ skill_id: s.id, enabled: true });
-        App.state.botSkills[id] = next;
-        try {
-          await submitBotSkills(id, () => (App.state.botSkills[id] || [])
-            .filter((x) => x.enabled).map((x) => ({ skill_id: x.skill_id, enabled: true })));
-          toast('技能已保存');
-        } catch (err) {
-          toast(err.message || '技能保存失败');
-        }
-        renderBotSkills();
-      });
-    }
-    el.appendChild(row);
-  }
-}
-
 /* ================= 设置 ================= */
 App.registerCommand('open-settings', () => {
   const c = App.state.config || {};
@@ -1985,27 +2347,31 @@ $('btn-mem-search').addEventListener('click', () => loadMemories($('mem-search')
 $('mem-search').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadMemories($('mem-search').value.trim()); });
 $('btn-mem-refresh').addEventListener('click', () => loadMemories($('mem-search').value.trim()));
 
-$('skill-bot-select').addEventListener('change', async (e) => {
-  App.state.pluginBotId = Number(e.target.value);
-  try {
-    await loadBotSkills(App.state.pluginBotId);
-  } catch (err) {
-    toast(err.message || '技能加载失败');
-  }
+/* ---- 自制插件弹窗 ---- */
+$('btn-plugin-add').addEventListener('click', () => openPluginModal(null));
+$('btn-plugin-save').addEventListener('click', savePlugin);
+$('btn-plugin-test').addEventListener('click', testPluginConnection);
+$('btn-skill-save').addEventListener('click', saveSkillParams);
+
+// 搜索：输入即过滤，只重渲染列表不动数据
+$('plugin-search').addEventListener('input', (e) => {
+  App.state.pluginSearch = e.target.value;
+  renderPluginPage();
 });
-$('btn-skill-refresh').addEventListener('click', async () => {
+
+// 刷新：重新拉技能、插件、当前 Bot 的技能状态
+$('btn-plugin-refresh').addEventListener('click', async () => {
   try {
     await loadSkills();
     await loadPlugins();
     if (App.state.pluginBotId) await loadBotSkills(App.state.pluginBotId);
+    renderPluginPage();
+    toast('已刷新');
   } catch (e) {
-    toast(e.message || '技能加载失败');
+    toast(e.message || '刷新失败');
   }
 });
 
-/* ---- 自制插件弹窗 ---- */
-$('btn-plugin-add').addEventListener('click', () => openPluginModal(null));
-$('btn-plugin-save').addEventListener('click', savePlugin);
 // 通用关闭：任何带 data-close 的按钮隐藏指定弹窗
 document.addEventListener('click', (e) => {
   const closer = e.target.closest('[data-close]');

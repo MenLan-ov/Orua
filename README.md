@@ -119,6 +119,7 @@ node scripts\checks\check-failure-visibility.mjs
 | GET | /bots/{id}/avatar | 头像图片 |
 | GET | /skills | 内置技能库（6 个：id / name / description / params_schema） |
 | GET/PUT | /bots/{id}/skills | 该 Bot 技能开关 / 全量覆盖 {skills:[{skill_id, enabled}]}（未知 skill_id 或 skills 非数组 → 400，Bot 不存在 → 404） |
+| GET/PUT | /bots/{id}/skills/{sid}/params | 该 Bot 下某技能的默认参数（PUT 只收对象，上限 8KB；技能未启用 → 404）（v0.5.3） |
 | GET/POST | /groups | 群列表 / 创建 {name, bot_ids[2-10], topic?} |
 | GET/PATCH/DELETE | /groups/{id} | 详情（含 members）/ 编辑（运行中改成员 → 409 + code 1002）/ 删除（运行中先停止） |
 | GET | /groups/{id}/messages?limit=200 | 群消息（倒序） |
@@ -162,6 +163,8 @@ node scripts\checks\check-failure-visibility.mjs
 |---|---|
 | `GET /api/v1/plugins` | 列出全部插件与可选事件 |
 | `POST /api/v1/plugins` | 新增；**同名视为更新**（「编辑」复用此接口） |
+| `POST /api/v1/plugins/test` | 连通性自检：同步 POST 一条 `plugin.test`，返回 `{ok,status,detail,elapsed_ms}`（v0.5.3） |
+| `POST /api/v1/plugins/reorder` | 按 `order` 数组重排投递顺序（v0.5.3） |
 | `DELETE /api/v1/plugins/{name}` | 按名称删除 |
 
 校验规则：名称非空且 ≤64 字符；URL 必须以 `http://` 或 `https://` 开头且 ≤2048 字符；事件仅接受上面四个（未知事件直接拒绝，避免配了永不触发的订阅）；最多 32 个插件。配置写入 `%LOCALAPPDATA%\Orua\config.json` 的 `plugins` 数组。
@@ -208,7 +211,7 @@ curl http://127.0.0.1:8765/health
 powershell -NoProfile -Command "(Get-Item dist\Orua\AiCompanion.exe).VersionInfo | Format-List ProductName,ProductVersion,FileVersion"
 ```
 
-- `/health` 返回 `{"status":"ok","version":"0.5.2"}`；启动器打开后侧栏脚注显示 `v0.5.2`（boot 时读 `/health` 覆盖，因此脚注反映的是**实际连上的后端**，不是 HTML 里的字面量）
+- `/health` 返回 `{"status":"ok","version":"0.5.3"}`；启动器打开后侧栏脚注显示 `v0.5.3`（boot 时读 `/health` 覆盖，因此脚注反映的是**实际连上的后端**，不是 HTML 里的字面量）
 - exe 的 `ProductVersion` / `FileVersion` 来自 `AiCompanion.App.csproj` 的 `<Version>`
 - 旧库首次启动会自动迁移：`group_messages` 的 `role` CHECK 放开 `system`（失败留痕），原地重建并保留全部历史行，幂等；日志里会出现 `db: group_messages 重建以放开 role='system'`
 
@@ -238,6 +241,36 @@ dotnet publish src\AiCompanion.App -c Release -r win-x64
 4. **Bot 编辑器提交前校验**：`max_tokens` 限 1–65536 整数（留空仍 2048），模型名与设置默认模型双空时拦在提交前并指出去哪儿填；`input` 补 `max` 属性。
 5. **版本三处同源 `4.1.0`**：exe 文件/产品版本、`/health`、侧栏脚注统一；脚注 boot 时读 `/health` 覆盖，反映实际连上的后端产物，避免 UI 与产物各说各话。
 6. **可证伪闸门**：三个 stub 检查脚本（`check-reminders-ui.mjs` 109 条 / `check-bot-skills-ui.mjs` 54 条 / `check-failure-visibility.mjs` 19 条）固化进 `scripts/checks/`，断言必须能被旧代码证伪——修复前副本跑应有 FAIL，修复后全 PASS。
+
+## v0.5.3 变更
+
+> 插件页按参考稿重做：卡片化布局、齿轮入口、连接自检。核心是把「插件/技能」从一张侧栏小列表升级成可管理的一页。
+
+1. **插件页重做**（`#view-plugins`）：标题带英文副标、右上「+ 添加插件」、搜索框（按名称/简介过滤）、`N / M 生效` 计数徽章、「刷新」。内容分两组——「内置技能」与「自制插件」，各自带条数，卡片按参考稿排布：名称 + 状态标签 + 操作按钮、能力 id 药丸、简介。
+2. **齿轮入口**：每张卡片右上角有齿轮按钮。技能卡打开「技能参数」弹窗，可改该 Bot 下这个技能的默认参数；插件卡打开「插件设置」弹窗，可改订阅事件、限定生效 Bot（多选）、临时停用。
+3. **插件可限定生效 Bot**：`config.json` 里插件新增 `bot_ids` 数组，空数组表示「全部 Bot」（保持 v0.5.2 语义，升级不需要迁移）。`EventBus::emit` 按事件里的 `bot_id` 过滤。
+4. **插件可临时停用**：新增 `enabled` 字段。停用后不再投递，但配置保留，卡片以 `已停用` 标签和降低的不透明度区分。
+5. **「测试连接」按钮**：`POST /api/v1/plugins/test` 同步 POST 一条 `plugin.test` 事件，2 秒超时，把 HTTP 状态码和响应片段回显在弹窗里。超时与正式投递一致，避免「测着通、发不出去」。
+6. **插件可排序**：`POST /api/v1/plugins/reorder`，卡片上的 ↑ 按钮调整投递顺序。
+7. **修 `parseUrl` 的 https 缺陷**：此前只剥 `http://`，`https://example.com/x` 会把 host 解析成 `https:`、path 变成 `//example.com/x`，投递必然失败。现在正确剥离并按 TLS 走 `WINHTTP_FLAG_SECURE`。
+8. **Webhook 投递改走 WinHTTP**：本项目 httplib 编译时未启用 OpenSSL（没有 `SSLClient`），https 地址根本无法投递。改用 WinHTTP 后同时获得 https 支持与系统代理复用，与 LLM 请求行为一致。顺带把「只有 200 算成功」放宽为 2xx。
+9. **修技能参数被清空的缺陷**：`setBotSkills` 每次保存都把 `params` 重置成 `{}`，导致重新勾选技能就丢掉已配参数。改为保存前先读回既有参数并保留。
+10. **技能参数可按 Bot 配置**：新增 `GET`/`PUT /api/v1/bots/{id}/skills/{sid}/params`。执行技能时把已存参数作为默认值，模型显式传的同名参数优先。
+11. **加载失败不给出可提交状态**：技能状态未从服务端确认时，勾选框与齿轮置灰，强行触发也会拒绝保存——否则会拿空集合覆盖服务端已有技能。保存失败同样撤销信任，需点「刷新」恢复。
+
+### v0.5.3
+
+1. 插件页标题、搜索、`N / M 生效` 徽章、「刷新」、「+ 添加插件」齐全，两组（内置技能 / 自制插件）各带条数。
+2. 搜索框按名称/简介过滤，清空后恢复全部。
+3. 每张卡片有齿轮按钮；技能卡打开参数弹窗，插件卡打开设置弹窗（订阅事件 + 生效 Bot 多选 + 启用开关）。
+4. 「生效 Bot」不选 = 全部 Bot；选了则卡片显示具体 Bot 名。
+5. 「测试连接」对可达地址返回 `ok:true` 与耗时；对不可达地址返回失败原因，不阻塞界面。
+6. ↑ 调整插件顺序并持久化；首项按钮禁用。
+7. 插件停用后卡片显示「已停用」，且不再投递事件。
+8. 重新勾选技能后，此前保存的参数仍在。
+9. https 地址可被正确解析并投递。
+10. 后端 `backend_tests` 102 用例 / 827 断言全通过；三个 stub 闸门 109 / 54 / 19 全通过；`smoke_plugins_v053.mjs` 21 条、`smoke_v053_features.mjs` 13 条全通过。
+11. 版本号三处同源 `0.5.3`：exe 文件版本 `0.5.3.0`、`/health` 返回 `0.5.3`、侧栏脚注显示 `v0.5.3`。
 
 ## v0.5.2 变更
 

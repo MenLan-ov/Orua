@@ -1,4 +1,4 @@
-// 通过 WebView2 CDP 验证 v0.5.2 插件页：布局、添加插件弹窗、真实提交、删除。
+// 通过 WebView2 CDP 验证 v0.5.3 插件页：布局、添加插件弹窗、真实提交、删除。
 // 用法：先启动 AiCompanion.exe（带 --remote-debugging-port），再 node scripts\smoke_plugins.mjs
 import http from 'node:http';
 
@@ -151,7 +151,7 @@ pass('插件已删除并从列表移除');
 
 // ---- 6. 版本号 ----
 const ver = await evaluate(`document.getElementById('foot-version').textContent`);
-if (ver !== 'v0.5.2') fail(`脚注版本号应为 v0.5.2，实际 ${ver}`);
+if (ver !== 'v0.5.3') fail(`脚注版本号应为 v0.5.3，实际 ${ver}`);
 pass(`脚注版本号 ${ver}`);
 
 console.log('\n全部插件页断言通过。');

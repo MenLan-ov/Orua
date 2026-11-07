@@ -81,19 +81,42 @@ class El {
     });
   }
   appendChild(c) { this.children.push(c); c.parentElement = this; return c; }
-  removeChild(c) { this.children = this.children.filter((x) => x !== c); return c; }
+  // 真实 DOM 支持；stub 里把插入的 HTML 记进 _html，并解析出其中的 <input>
+  insertAdjacentHTML(_pos, html) {
+    this._html += String(html ?? '');
+    for (const m of String(html ?? '').matchAll(/<input\b[^>]*>/g)) {
+      const inp = makeInputEl(m[0]);
+      inp.parentElement = this;
+      this._inputs.push(inp);
+    }
+  }  removeChild(c) { this.children = this.children.filter((x) => x !== c); return c; }
   remove() { this.parentElement?.removeChild(this); }
-  allInputs() { return [...this._inputs, ...this.children.flatMap((c) => c.allInputs())]; }
+  // 收集本子树里所有 input。v0.5.3 起卡片是用 createElement 搭的，
+  // 这些节点是 El 实例、tagName 为 INPUT，不再只存在于 _inputs 里。
+  allInputs() {
+    const out = [...this._inputs];
+    if (this.tagName === 'INPUT') out.push(this);
+    for (const c of this.children) out.push(...c.allInputs());
+    return out;
+  }
   querySelector(sel) {
     if (sel === 'input') return this.allInputs()[0] || null;
     if (sel === 'input:checked') return this.allInputs().find((i) => i.checked) || null;
     const m = /^\[data-([\w-]+)\]/.exec(sel);
-    if (m) return this.allInputs().find((i) => i.dataset[m[1]] !== undefined) || null;
+    if (m) {
+      const key = m[1];
+      return this.allInputs().find((i) => i.dataset[key] !== undefined) || null;
+    }
     return null;
   }
   querySelectorAll(sel) {
     const all = this.allInputs();
     if (sel === 'input:checked') return all.filter((i) => i.checked);
+    const m = /^\[data-([\w-]+)\]/.exec(sel);
+    if (m) {
+      const key = m[1];
+      return all.filter((i) => i.dataset[key] !== undefined);
+    }
     return all;
   }
   addEventListener(type, fn) { (this._listeners[type] ||= []).push(fn); }
@@ -114,16 +137,39 @@ class El {
 function makeDocument() {
   const registry = new Map();
   const listeners = {};
+  // 真实 DOM 的 getElementById 是遍历整棵树，不只看「曾经 new 过的节点」。
+  // v0.5.3 起技能行是 createElement 动态挂到树上的，必须按树查才找得到。
+  function findByTree(root, id) {
+    if (!root) return null;
+    if (root.id === id) return root;
+    for (const c of root.children || []) {
+      const hit = findByTree(c, id);
+      if (hit) return hit;
+    }
+    return null;
+  }
   const doc = {
     registry,
     documentElement: new El('html'),
     body: new El('body'),
     listeners,
     getElementById(id) {
-      if (!registry.has(id)) registry.set(id, new El('div', id));
+      const hit = findByTree(doc.body, id) || findByTree(doc.documentElement, id);
+      if (hit) return hit;
+      if (!registry.has(id)) {
+        const el = new El('div', id);
+        // 惰性创建的顶层节点挂到 body 下，后续动态 append 的子节点才能被树查找命中
+        doc.body.appendChild(el);
+        registry.set(id, el);
+      }
       return registry.get(id);
     },
     createElement: (tag) => new El(tag),
+    createTextNode: (t) => {
+      const n = new El('#text');
+      n.textContent = String(t ?? '');
+      return n;
+    },
     querySelector: () => null,
     querySelectorAll: () => [],
     addEventListener: (t, fn) => { (listeners[t] ||= []).push(fn); },
@@ -410,7 +456,7 @@ async function caseF() {
   await env.flush();
   const first = await env.probe(`submitBotSkills(1, () => { throw new Error('注入：状态读取失败'); }).then(() => 'resolved', (e) => 'rejected:' + e.message)`);
   check('F1 read 抛错上报给该次调用方', String(first).startsWith('rejected:'), String(first));
-  env.doc.getElementById('btn-skill-refresh').dispatch('click');   // 真实「刷新」按钮恢复可信态
+  env.doc.getElementById('btn-plugin-refresh').dispatch('click');   // 真实「刷新」按钮恢复可信态
   await env.flush(80);
   check('F2 刷新后行恢复可编辑', env.inputsIn('bot-skills-list').every((r) => !r.disabled));
   env.click('s3', true);
@@ -442,7 +488,7 @@ async function caseG() {
   check('G3 服务端集合未被改动', JSON.stringify(env.server.botSkills.get(1)) === JSON.stringify([{ skill_id: 's1', enabled: true }, { skill_id: 's2', enabled: true }]), JSON.stringify(env.server.botSkills.get(1)));
   check('G4 失败按既有约定抛出服务端文案', env.toasts.includes('注入故障'), JSON.stringify(env.toasts));
   check('G5 失败后行转禁用（I-1 门未被削弱）', env.row('s1').disabled === true);
-  env.doc.getElementById('btn-skill-refresh').dispatch('click');
+  env.doc.getElementById('btn-plugin-refresh').dispatch('click');
   await env.flush(150);
   const reloaded = env.inputsIn('bot-skills-list');
   check('G6 刷新后展示服务端真值：s1/s2 勾选、s3 未勾选且可编辑',

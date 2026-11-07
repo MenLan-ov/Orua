@@ -52,7 +52,7 @@
             <span id="status-text">连接中…</span>
           </div>
           <div class="foot-buttons">
-            <span id="foot-version" class="foot-version">v0.5.2</span>
+            <span id="foot-version" class="foot-version">v0.5.3</span>
             <button id="btn-settings" class="btn-ghost">⚙ 设置</button>
             <button id="btn-quit" class="btn-ghost">退出</button>
           </div>
@@ -176,48 +176,24 @@
       </div>
 
       <div id="view-plugins" class="view hidden">
+        <!-- 标题行：标题 + 添加 + 搜索 + 计数徽章 + 刷新（参考图布局） -->
         <div class="view-header">
-          <h2>插件</h2>
-          <button id="btn-plugin-add" class="btn-primary">+ 添加插件</button>
+          <h2>插件 <span class="h2-sub">Plugin</span></h2>
+          <button id="btn-plugin-add" class="btn-primary btn-sm">+ 添加插件</button>
+          <input id="plugin-search" class="plugin-search" type="text"
+                 placeholder="搜索插件名称 / 简介…">
+          <span id="plugins-badge" class="count-badge">0 / 0 生效</span>
+          <button id="btn-plugin-refresh" class="btn-ghost btn-sm">刷新</button>
         </div>
-        <div class="plugin-layout">
-          <div class="plugin-col">
-            <div class="plugin-section">
-              <div class="plugin-section-head">
-                <h3>内置技能</h3>
-                <span class="plugin-count" id="skills-count"></span>
-              </div>
-              <div class="mem-hint">随应用内置，供 Bot 在单聊中经 Function calling 调用</div>
-              <div id="skills-list" class="skill-grid"></div>
-            </div>
 
-            <div class="plugin-section">
-              <div class="plugin-section-head">
-                <h3>自制插件</h3>
-                <span class="plugin-count" id="plugins-count"></span>
-              </div>
-              <div class="mem-hint">
-                把事件 POST 到你自己的 Webhook 地址。支持事件：
-                <code>chat.completed</code> / <code>chat.error</code> /
-                <code>session.created</code> / <code>session.deleted</code>
-              </div>
-              <div id="plugins-list" class="plugin-list"></div>
-            </div>
-          </div>
+        <div class="plugin-intro">
+          插件是确定性扩展：由核心代码按能力名精确调用 —— 条件满足就一定会执行，
+          不经过 LLM，模型想忽略也忽略不掉。代价是它不能「看情况发挥」，
+          什么时候触发必须写死在代码里。需要模型理解意图的功能，应该做成「技能」。
+        </div>
 
-          <div class="plugin-col plugin-col-side">
-            <div class="plugin-section">
-              <div class="plugin-section-head">
-                <h3>Bot 技能</h3>
-                <button id="btn-skill-refresh" class="btn-ghost btn-sm">刷新</button>
-              </div>
-              <div class="plugin-bot-picker">
-                <select id="skill-bot-select"></select>
-              </div>
-              <div class="mem-hint">勾选启用后，该 Bot 在单聊中可通过 Function calling 调用技能</div>
-              <div id="bot-skills-list"></div>
-            </div>
-          </div>
+        <div class="plugin-body">
+          <div id="plugin-groups"></div>
         </div>
       </div>
 
@@ -230,12 +206,37 @@
           <input id="plugin-name" type="text" maxlength="64" placeholder="例如：我的通知机器人">
           <label>Webhook 地址</label>
           <input id="plugin-url" type="text" maxlength="2048" placeholder="https://example.com/orua-hook">
-          <label>订阅事件</label>
-          <div id="plugin-events" class="member-checks"></div>
+          <div class="field-row">
+            <div class="field-col">
+              <label>订阅事件</label>
+              <div id="plugin-events" class="member-checks"></div>
+            </div>
+            <div class="field-col">
+              <label>生效 Bot <span class="label-hint">不选 = 全部 Bot</span></label>
+              <div id="plugin-bots" class="member-checks"></div>
+            </div>
+          </div>
+          <label class="chk"><input id="plugin-enabled" type="checkbox" checked> 启用此插件</label>
+          <div id="plugin-test-result" class="test-result hidden"></div>
           <div id="plugin-form-error" class="form-error hidden"></div>
           <div class="modal-actions">
+            <button id="btn-plugin-test" class="btn-ghost">测试连接</button>
             <button class="btn-ghost" data-close="modal-plugin">取消</button>
             <button id="btn-plugin-save" class="btn-primary">保存</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 技能参数弹窗（齿轮） -->
+      <div id="modal-skill" class="modal hidden">
+        <div class="modal-box">
+          <h3 id="skill-modal-title">技能参数</h3>
+          <div class="modal-section-title" id="skill-modal-desc"></div>
+          <div id="skill-params-form"></div>
+          <div id="skill-form-error" class="form-error hidden"></div>
+          <div class="modal-actions">
+            <button class="btn-ghost" data-close="modal-skill">取消</button>
+            <button id="btn-skill-save" class="btn-primary">保存参数</button>
           </div>
         </div>
       </div>

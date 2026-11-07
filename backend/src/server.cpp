@@ -458,6 +458,21 @@ void runChat(int64_t sessionId, const std::string& content, bool appendUser,
               // 提醒必须落到当前 Bot：params 全部来自 LLM 的 arguments，没人会填 bot_id，
               // 于是原先一律 bot_id=0，deleteBot 级联与「谁提醒你」都失效
               if (name == "reminder" && botId > 0) params["bot_id"] = botId;
+              // v0.5.3：把用户在齿轮弹窗里为该技能配的参数合并进来。
+              // 语义：用户配置作为「默认值」，LLM 显式传入的同名参数优先（LLM 更了解本次意图）。
+              if (botId > 0) {
+                if (auto raw = db::getBotSkillParams(botId, name)) {
+                  try {
+                    if (!raw->empty()) {
+                      json saved = json::parse(*raw);
+                      if (saved.is_object())
+                        for (auto it = saved.begin(); it != saved.end(); ++it)
+                          if (!params.contains(it.key())) params[it.key()] = it.value();
+                    }
+                  } catch (...) {
+                  }
+                }
+              }
               std::string payload;
               try {
                 json result = sk::execute(name, params);
@@ -477,12 +492,14 @@ void runChat(int64_t sessionId, const std::string& content, bool appendUser,
               mem::MemoryService::instance().enqueueExtract(
                   botId, "private", 0, "用户：" + userText + "\n助手：" + *full + "\n", aid);
             db::touchSession(sessionId);
+            // v0.5.3：带上 bot_id，供插件按「生效 Bot」过滤分发
             ev::EventBus::instance().emit(
                 "chat.completed",
-                {{"session_id", sessionId}, {"length", full->size()}});
+                {{"session_id", sessionId}, {"bot_id", botId}, {"length", full->size()}});
           } else if (*hadError) {
             ev::EventBus::instance().emit(
                 "chat.error", {{"session_id", sessionId},
+                               {"bot_id", botId},
                                {"code", *errCode},
                                {"message", *errMsg}});
           }
@@ -899,7 +916,11 @@ bool isHttpUrl(const std::string& u) {
 }
 
 json pluginToJson(const cfg::Plugin& p) {
-  return {{"name", p.name}, {"url", p.url}, {"events", p.events}};
+  return {{"name", p.name},
+          {"url", p.url},
+          {"events", p.events},
+          {"enabled", p.enabled},
+          {"bot_ids", p.bot_ids}};
 }
 
 // 校验并归一化一条插件；失败返回空串并写入 err。
@@ -957,12 +978,101 @@ std::string normalizePlugin(const json& body, cfg::Plugin& out, std::string& err
     err = "订阅事件过多";
     return "";
   }
+
+  // v0.5.3：enabled 默认 true；bot_ids 为空表示对所有 Bot 生效
+  out.enabled = body.value("enabled", true);
+  out.bot_ids.clear();
+  if (body.contains("bot_ids") && body["bot_ids"].is_array()) {
+    for (auto& b : body["bot_ids"]) {
+      if (!b.is_number_integer()) continue;
+      int64_t id = b.get<int64_t>();
+      if (id <= 0) continue;
+      if (std::find(out.bot_ids.begin(), out.bot_ids.end(), id) == out.bot_ids.end())
+        out.bot_ids.push_back(id);
+    }
+  }
   return out.name;
 }
 
 }  // namespace
 
 void registerPluginRoutes(httplib::Server& svr, const std::string& cfgPath) {
+  // v0.5.3：测试连接。放在插件路由之前，避免被 /api/v1/plugins 的通配吞掉。
+  svr.Post("/api/v1/plugins/test", [](const httplib::Request& req, httplib::Response& res) {
+    json body = parseBody(req, res);
+    if (res.status == 400) return;
+    std::string url = body.value("url", "");
+    // 允许只传插件名，用已保存的地址测试
+    if (url.empty() && body.contains("name")) {
+      std::string name = body.value("name", "");
+      if (!name.empty()) {
+        // 这里没有 cfgPath，改由前端传 url；仅作兜底提示
+        fail(res, 400, 400, "请提供 url");
+        return;
+      }
+    }
+    auto trim = [](std::string s) {
+      size_t b = s.find_first_not_of(" \t\r\n");
+      size_t e = s.find_last_not_of(" \t\r\n");
+      return b == std::string::npos ? std::string() : s.substr(b, e - b + 1);
+    };
+    url = trim(url);
+    if (url.empty()) {
+      fail(res, 400, 400, "Webhook 地址不能为空");
+      return;
+    }
+    if (!isHttpUrl(url)) {
+      fail(res, 400, 400, "Webhook 地址必须以 http:// 或 https:// 开头");
+      return;
+    }
+    auto r = ev::EventBus::instance().ping(url);
+    res.set_content(okJson(json{{"ok", r.ok},
+                                {"status", r.status},
+                                {"detail", r.detail},
+                                {"elapsed_ms", r.elapsed_ms}})
+                        .dump(),
+                    "application/json; charset=utf-8");
+  });
+
+  // v0.5.3：插件顺序即分发顺序。前端 ↑ 按钮整表重排后回写这里。
+  // 只接受「与现有集合完全一致的重排」，避免借排序接口夹带增删。
+  svr.Post("/api/v1/plugins/reorder", [cfgPath](const httplib::Request& req,
+                                                httplib::Response& res) {
+    if (cfgPath.empty()) {
+      fail(res, 500, 500, "配置文件路径未初始化");
+      return;
+    }
+    json body = parseBody(req, res);
+    if (res.status == 400) return;
+    if (!body.contains("order") || !body["order"].is_array()) {
+      fail(res, 400, 400, "order 必须是插件名数组");
+      return;
+    }
+    std::vector<std::string> order;
+    for (auto& n : body["order"])
+      if (n.is_string()) order.push_back(n.get<std::string>());
+
+    auto sc = cfg::load(cfgPath);
+    if (order.size() != sc.plugins.size()) {
+      fail(res, 400, 400, "排序列表与现有插件数量不一致");
+      return;
+    }
+    std::vector<cfg::Plugin> reordered;
+    for (auto& name : order) {
+      auto it = std::find_if(sc.plugins.begin(), sc.plugins.end(),
+                             [&](const cfg::Plugin& x) { return x.name == name; });
+      if (it == sc.plugins.end()) {
+        fail(res, 400, 400, "未知插件：" + name);
+        return;
+      }
+      reordered.push_back(*it);
+    }
+    sc.plugins = std::move(reordered);
+    cfg::save(cfgPath, sc);
+    ev::EventBus::instance().loadPlugins(sc.plugins);
+    res.set_content(okJson(json{{"ok", true}}).dump(), "application/json; charset=utf-8");
+  });
+
   svr.Get("/api/v1/plugins", [cfgPath](const httplib::Request&, httplib::Response& res) {
     auto sc = cfg::load(cfgPath);
     json arr = json::array();
@@ -1049,10 +1159,66 @@ void registerSkillRoutes(httplib::Server& svr) {
       return;
     }
     json arr = json::array();
-    for (auto& s : db::listBotSkills(id))
-      arr.push_back({{"skill_id", s.skill_id}, {"enabled", s.enabled}});
+    for (auto& s : db::listBotSkills(id)) {
+      // v0.5.3：带上 params，前端齿轮弹窗要回填已配置的值
+      json p = json::object();
+      try {
+        if (!s.params.empty()) p = json::parse(s.params);
+      } catch (...) {
+      }
+      arr.push_back({{"skill_id", s.skill_id}, {"enabled", s.enabled}, {"params", p}});
+    }
     res.set_content(okJson(json{{"skills", arr}}).dump(), "application/json; charset=utf-8");
   });
+
+  // v0.5.3：单个技能的参数读写（齿轮弹窗用）
+  svr.Get(R"(/api/v1/bots/(\d+)/skills/([A-Za-z0-9_]+)/params)",
+          [](const httplib::Request& req, httplib::Response& res) {
+            int64_t id = std::stoll(req.matches[1].str());
+            std::string sid = req.matches[2].str();
+            if (!db::getBot(id)) {
+              fail(res, 404, 404, "Bot 不存在");
+              return;
+            }
+            auto raw = db::getBotSkillParams(id, sid);
+            if (!raw) {
+              fail(res, 404, 404, "该 Bot 未启用技能：" + sid);
+              return;
+            }
+            json p = json::object();
+            try {
+              if (!raw->empty()) p = json::parse(*raw);
+            } catch (...) {
+            }
+            res.set_content(okJson(json{{"skill_id", sid}, {"params", p}}).dump(),
+                            "application/json; charset=utf-8");
+          });
+
+  svr.Put(R"(/api/v1/bots/(\d+)/skills/([A-Za-z0-9_]+)/params)",
+          [](const httplib::Request& req, httplib::Response& res) {
+            int64_t id = std::stoll(req.matches[1].str());
+            std::string sid = req.matches[2].str();
+            if (!db::getBot(id)) {
+              fail(res, 404, 404, "Bot 不存在");
+              return;
+            }
+            json body = parseBody(req, res);
+            if (res.status == 400) return;
+            if (!body.contains("params") || !body["params"].is_object()) {
+              fail(res, 400, 400, "params 必须是 JSON 对象");
+              return;
+            }
+            if (body["params"].dump().size() > 8192) {
+              fail(res, 400, 400, "参数过大（上限 8KB）");
+              return;
+            }
+            if (!db::setBotSkillParams(id, sid, body["params"].dump())) {
+              fail(res, 404, 404, "该 Bot 未启用技能：" + sid);
+              return;
+            }
+            res.set_content(okJson(json{{"skill_id", sid}, {"params", body["params"]}}).dump(),
+                            "application/json; charset=utf-8");
+          });
 
   svr.Put(R"(/api/v1/bots/(\d+)/skills)", [](const httplib::Request& req, httplib::Response& res) {
     int64_t id = std::stoll(req.matches[1].str());
@@ -1319,8 +1485,11 @@ void registerSessionRoutes(httplib::Server& svr) {
 
   svr.Delete(R"(/api/v1/sessions/(\d+))", [](const httplib::Request& req, httplib::Response& res) {
     int64_t id = std::stoll(req.matches[1].str());
+    // v0.5.3：删除前先取 bot_id，否则插件按 Bot 过滤时拿不到归属
+    int64_t botId = 0;
+    if (auto s = db::getSession(id)) botId = s->bot_id;
     db::deleteSession(id);
-    ev::EventBus::instance().emit("session.deleted", {{"id", id}});
+    ev::EventBus::instance().emit("session.deleted", {{"id", id}, {"bot_id", botId}});
     res.set_content(okJson(json::object()).dump(), "application/json; charset=utf-8");
   });
 }
@@ -1446,7 +1615,7 @@ void registerRoutes(httplib::Server& svr, const std::string& staticDir,
   });
 
   svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
-    res.set_content("{\"status\":\"ok\",\"version\":\"0.5.2\"}", "application/json; charset=utf-8");
+    res.set_content("{\"status\":\"ok\",\"version\":\"0.5.3\"}", "application/json; charset=utf-8");
   });
 
   registerSkillRoutes(svr);

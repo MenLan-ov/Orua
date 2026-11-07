@@ -38,6 +38,11 @@ ServerConfig load(const std::string& path) {
         pl.url = p.value("url", "");
         if (p.contains("events") && p["events"].is_array())
           for (auto& e : p["events"]) pl.events.push_back(e.get<std::string>());
+        // v0.5.3 新增字段：旧配置里没有这两项，用默认值兜住（enabled=true、bot_ids 空=全 Bot）
+        pl.enabled = p.value("enabled", true);
+        if (p.contains("bot_ids") && p["bot_ids"].is_array())
+          for (auto& b : p["bot_ids"])
+            if (b.is_number_integer()) pl.bot_ids.push_back(b.get<int64_t>());
         c.plugins.push_back(std::move(pl));
       }
     }
@@ -64,7 +69,11 @@ void save(const std::string& path, const ServerConfig& c) {
         {"temperature", c.temperature}}},
       {"plugins", json::array()}};
   for (auto& p : c.plugins)
-    j["plugins"].push_back({{"name", p.name}, {"url", p.url}, {"events", p.events}});
+    j["plugins"].push_back({{"name", p.name},
+                            {"url", p.url},
+                            {"events", p.events},
+                            {"enabled", p.enabled},
+                            {"bot_ids", p.bot_ids}});
   std::ofstream f(path);
   f << j.dump(2);
 }

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <map>
 #include <mutex>
 #include <stdexcept>
 
@@ -775,13 +776,21 @@ void setBotSkills(int64_t botId,
                   const std::vector<std::pair<std::string, bool>>& skills) {
   std::lock_guard<std::recursive_mutex> lock(g_mtx);
   std::string ts = nowIso();
+  // v0.5.3：勾选/取消技能不该清掉已配置的参数，先把旧的 params 读出来保留。
+  std::map<std::string, std::string> oldParams;
+  query("SELECT skill_id,params FROM bot_skills WHERE bot_id=?",
+        {std::to_string(botId)}, [&](sqlite3_stmt* st) {
+          oldParams[colText(st, 0)] = colText(st, 1);
+        });
   exec("BEGIN IMMEDIATE");
   try {
     execute("DELETE FROM bot_skills WHERE bot_id=?", {std::to_string(botId)});
     for (auto& [sid, on] : skills) {
+      auto it = oldParams.find(sid);
+      std::string p = it != oldParams.end() && !it->second.empty() ? it->second : "{}";
       execute("INSERT INTO bot_skills(bot_id,skill_id,enabled,params,created_at,updated_at) "
               "VALUES(?,?,?,?,?,?)",
-              {std::to_string(botId), sid, on ? "1" : "0", "{}", ts, ts});
+              {std::to_string(botId), sid, on ? "1" : "0", p, ts, ts});
     }
     exec("COMMIT");
   } catch (...) {
@@ -797,6 +806,31 @@ std::vector<BotSkill> listBotSkills(int64_t botId) {
         "FROM bot_skills WHERE bot_id=? ORDER BY id ASC",
         {std::to_string(botId)},
         [&](sqlite3_stmt* st) { out.push_back(rowToSkill(st)); });
+  return out;
+}
+
+// v0.5.3：技能参数的读写。参数存 bot_skills.params（JSON 文本）。
+// 只更新已有行的 params，不动 enabled——「改参数」与「启停技能」是两件事。
+bool setBotSkillParams(int64_t botId, const std::string& skillId,
+                       const std::string& params) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  int before = 0;
+  query("SELECT COUNT(*) FROM bot_skills WHERE bot_id=? AND skill_id=?",
+        {std::to_string(botId), skillId},
+        [&](sqlite3_stmt* st) { before = sqlite3_column_int(st, 0); });
+  if (before == 0) return false;
+  execute("UPDATE bot_skills SET params=?, updated_at=? WHERE bot_id=? AND skill_id=?",
+          {params, nowIso(), std::to_string(botId), skillId});
+  return true;
+}
+
+std::optional<std::string> getBotSkillParams(int64_t botId, const std::string& skillId) {
+  std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  std::optional<std::string> out;
+  query("SELECT params FROM bot_skills WHERE bot_id=? AND skill_id=?",
+        {std::to_string(botId), skillId}, [&](sqlite3_stmt* st) {
+          out = colText(st, 0);
+        });
   return out;
 }
 

@@ -127,6 +127,9 @@ std::vector<Memory> listMemories(int64_t botId, const std::string& scope = "",
 void setBotSkills(int64_t botId,
                   const std::vector<std::pair<std::string, bool>>& skills);
 std::vector<BotSkill> listBotSkills(int64_t botId);
+// v0.5.3：单独读写某个技能的参数（JSON 文本）。技能未注册时返回 false。
+bool setBotSkillParams(int64_t botId, const std::string& skillId, const std::string& params);
+std::optional<std::string> getBotSkillParams(int64_t botId, const std::string& skillId);
 Reminder addReminder(int64_t botId, const std::string& content,
                      const std::string& dueAt);
 std::vector<Reminder> listReminders(bool dueOnly);
