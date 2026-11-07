@@ -9,6 +9,20 @@
 
 namespace grp {
 
+namespace {
+// 失败留痕（role=system）只给人看：不进模型上下文窗口，也不进记忆提取快照。
+// 取宽窗口再倒序挑 want 条，留痕因此不占用「最近 N 条」名额。
+std::vector<db::GroupMessage> recentChatRows(int64_t groupId, size_t want) {
+  const auto rows = db::listGroupMessages(groupId, static_cast<int>(want * 5 + 20));
+  std::vector<db::GroupMessage> out;
+  for (auto it = rows.rbegin(); it != rows.rend() && out.size() < want; ++it) {
+    if (it->role == "system") continue;
+    out.insert(out.begin(), *it);
+  }
+  return out;
+}
+}  // namespace
+
 GroupEngine::GroupEngine(int64_t groupId, StreamFn streamFn)
     : groupId_(groupId), streamFn_(std::move(streamFn)) {}
 
@@ -144,6 +158,8 @@ void GroupEngine::loop() {
       broadcast("status", {{"state", "paused"}, {"turn", turn}});
       broadcast("error", {{"bot_id", 0}, {"name", ""},
                           {"message", "群内机器人全员连续失败，已自动暂停"}});
+      db::appendGroupMessage(groupId_, 0, "system",
+                             "⚠ 群内机器人全员连续失败，已自动暂停");
       continue;   // 阻塞等待 resume，而非退出线程
     }
     idx = (idx + 1) % members_.size();
@@ -203,11 +219,16 @@ bool GroupEngine::runTurn(const Member& m, int turn) {
   if (stopFlag_) return false;   // 被停止：不落库不广播
   if (failed) {
     failCount_[m.bot_id]++;
-    broadcast("error", {{"bot_id", m.bot_id}, {"name", m.name},
-                        {"message", errMsg.empty() ? "回复失败" : errMsg}});
+    const std::string reason = errMsg.empty() ? "回复失败" : errMsg;
+    // 失败必须留痕：房间重开时（reconcile 走 REST）也要能看出为什么没回复
+    db::appendGroupMessage(groupId_, 0, "system",
+                           "⚠ " + m.name + " 回复失败：" + reason);
+    broadcast("error", {{"bot_id", m.bot_id}, {"name", m.name}, {"message", reason}});
     if (failCount_[m.bot_id] >= 3) {
       state_ = State::Paused;
       db::setGroupStatus(groupId_, "paused");
+      db::appendGroupMessage(groupId_, 0, "system",
+                             "⚠ " + m.name + " 连续失败 3 次，群聊已自动暂停");
       broadcast("status", {{"state", "paused"}, {"turn", turn}});
     }
     return false;
@@ -219,7 +240,7 @@ bool GroupEngine::runTurn(const Member& m, int turn) {
   broadcast("turn_end", {{"bot_id", m.bot_id}});
   // v3：轮末异步提取该 Bot 的群记忆（最近 4 条群消息作对话快照）
   {
-    auto snap = db::listGroupMessages(groupId_, 4);
+    auto snap = recentChatRows(groupId_, 4);
     std::string dialogue;
     for (auto& gm : snap) {
       std::string who = "用户";
@@ -264,7 +285,7 @@ llm::ChatRequest GroupEngine::buildRequest(const db::Bot& bot) {
   auto group = db::getGroup(groupId_);
   if (group && !group->topic.empty())
     req.messages.push_back({"system", "当前群聊话题：" + group->topic});
-  auto msgs = db::listGroupMessages(groupId_, 12);   // 最近 12 条（v3：随记忆块缩小）
+  auto msgs = recentChatRows(groupId_, 12);   // 最近 12 条真实发言（v3：随记忆块缩小）
   std::string recent;
   for (auto& gm : msgs) recent += gm.content + "\n";
   auto mems =

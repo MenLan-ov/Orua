@@ -80,15 +80,6 @@ CREATE TABLE IF NOT EXISTS group_members (
   position INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_group_members_group ON group_members(group_id, position);
-CREATE TABLE IF NOT EXISTS group_messages (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  group_id   INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
-  bot_id     INTEGER,
-  role       TEXT NOT NULL CHECK(role IN ('user','assistant')),
-  content    TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_group_messages_group ON group_messages(group_id, id);
 CREATE TABLE IF NOT EXISTS bot_memories (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   bot_id INTEGER NOT NULL,
@@ -122,6 +113,19 @@ CREATE TABLE IF NOT EXISTS reminders (
 );
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(done, due_at);
 )SQL";
+
+// group_messages 的 DDL 单独成常量：新库建表与旧库迁移重建共用同一段，
+// 防止 CHECK(role…) 这类约束在两处各写一遍、改一处漏一处。
+const char* kGroupMessagesDdl =
+    "CREATE TABLE IF NOT EXISTS group_messages (\n"
+    "  id         INTEGER PRIMARY KEY AUTOINCREMENT,\n"
+    "  group_id   INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,\n"
+    "  bot_id     INTEGER,\n"
+    "  role       TEXT NOT NULL CHECK(role IN ('user','assistant','system')),\n"
+    "  content    TEXT NOT NULL,\n"
+    "  created_at TEXT NOT NULL\n"
+    ");\n"
+    "CREATE INDEX IF NOT EXISTS idx_group_messages_group ON group_messages(group_id, id);\n";
 
 std::string colText(sqlite3_stmt* st, int i) {
   const unsigned char* t = sqlite3_column_text(st, i);
@@ -242,6 +246,26 @@ bool open(const std::string& dbPath) {
   }
   try {
     exec(kSchema);
+    // role='system'（群聊失败留痕）是后加的 CHECK 约束，而 CHECK 不能 ALTER。
+    // 旧库原地重建：改名 → 用新 DDL 建表 → 整行搬回 → 删旧表。列序与 DDL 一致，
+    // 搬迁用显式列名，旧库多/少列时是明确的报错而不是静默错位。
+    std::string gmDdl;
+    query("SELECT sql FROM sqlite_master WHERE type='table' AND name='group_messages'", {},
+          [&](sqlite3_stmt* st) { gmDdl = colText(st, 0); });
+    if (!gmDdl.empty() && gmDdl.find("'system'") == std::string::npos) {
+      exec("PRAGMA foreign_keys=OFF");
+      exec("BEGIN");
+      exec("DROP INDEX IF EXISTS idx_group_messages_group");
+      exec("ALTER TABLE group_messages RENAME TO group_messages_old");
+      exec(kGroupMessagesDdl);
+      exec("INSERT INTO group_messages(id,group_id,bot_id,role,content,created_at) "
+           "SELECT id,group_id,bot_id,role,content,created_at FROM group_messages_old");
+      exec("DROP TABLE group_messages_old");
+      exec("COMMIT");
+      exec("PRAGMA foreign_keys=ON");
+      logx::info("db: group_messages 重建以放开 role='system'");
+    }
+    exec(kGroupMessagesDdl);
     // sessions.bot_id 列迁移（旧库 ALTER 补列；新库建表后同样走此路径）
     bool hasBotId = false;
     query("PRAGMA table_info(sessions)", {},

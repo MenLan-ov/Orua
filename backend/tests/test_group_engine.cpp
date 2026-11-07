@@ -180,7 +180,7 @@ TEST_CASE("engine: 单轮失败重试一次并跳过（不计成功轮）") {
   std::filesystem::remove(path);
 }
 
-TEST_CASE("engine: 永远失败 → 每轮调用2次（重试1次）且不落库") {
+TEST_CASE("engine: 永远失败 → 失败原因落库留痕（重开房间能看到为什么停了）") {
   auto path = tmpDb("ac_v2_engine_fail2.db");
   REQUIRE(db::open(path.string()));
   db::setSetting("memory_extraction", "0");   // 引擎测试不触发提取 LLM 调用
@@ -200,8 +200,63 @@ TEST_CASE("engine: 永远失败 → 每轮调用2次（重试1次）且不落库
   CHECK(e.state() == "paused");
   CHECK(col.last("status")["state"] == "paused");
   CHECK(fake.calls.load() >= 6);                        // 每轮重试1次 = 2 次调用
-  CHECK(db::listGroupMessages(g.id).empty());
   REQUIRE(e.stop());
+
+  // 失败轮不落机器人正文，但必须落 system 留痕：关掉引擎再进房间时，REST 读到的就是这些行
+  int botMsgs = 0, notes = 0;
+  bool hasReason = false, hasPause = false;
+  for (auto& m : db::listGroupMessages(g.id)) {
+    if (m.role == "system") {
+      ++notes;
+      CHECK(m.bot_id == 0);
+      if (m.content.find("模拟网络错误") != std::string::npos) hasReason = true;
+      if (m.content.find("自动暂停") != std::string::npos) hasPause = true;
+    } else if (m.role == "assistant") {
+      ++botMsgs;
+    }
+  }
+  CHECK(botMsgs == 0);
+  CHECK(notes >= 3);
+  CHECK(hasReason);   // 留痕带错误原文，否则重开房间只知道「停了」不知道「为什么」
+  CHECK(hasPause);    // 自动暂停这件事本身也要留痕
+  db::close();
+  std::filesystem::remove(path);
+}
+
+TEST_CASE("engine: 失败留痕不占最近12条窗口（不进模型上下文）") {
+  auto path = tmpDb("ac_f12_engine_note_ctx.db");
+  REQUIRE(db::open(path.string()));
+  db::setSetting("memory_extraction", "0");
+  auto b1 = db::createBot([] {
+    db::Bot b; b.name = "甲"; b.system_prompt = "你是甲"; return b;
+  }());
+  auto g = db::createGroup("留痕上下文群", "");
+  db::setGroupMembers(g.id, {b1.id});
+  for (int i = 0; i < 15; ++i)
+    db::appendGroupMessage(g.id, 0, "user", "u" + std::to_string(i));
+  db::appendGroupMessage(g.id, 0, "system", "⚠ 甲 回复失败：模拟网络错误");
+  db::appendGroupMessage(g.id, 0, "user", "u15");
+
+  FakeStream fake;
+  fake.pieces = {"好"};
+  Collector col;
+  grp::GroupEngine e(g.id, std::ref(fake));
+  e.subscribe(std::ref(col));
+  REQUIRE(e.start());
+  waitUntil([&] { return col.count("turn_end") >= 1; });
+  REQUIRE(e.stop());
+
+  std::vector<llm::ChatMsg> ctx;
+  {
+    std::lock_guard<std::mutex> lk(fake.reqMtx);
+    ctx = fake.lastMessages;
+  }
+  REQUIRE(ctx.size() == 13);                 // 人设 + 最近 12 条真实对话
+  CHECK(ctx[0].content == "你是甲");
+  CHECK(ctx[1].content == "u4");             // 留痕不占窗口：12 条仍是 u4..u15
+  CHECK(ctx.back().content == "u15");
+  for (auto& m : ctx)
+    CHECK(m.content.find("回复失败") == std::string::npos);
   db::close();
   std::filesystem::remove(path);
 }

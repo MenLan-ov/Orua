@@ -99,3 +99,49 @@ TEST_CASE("migration: 空库播种默认机器人") {
   db::close();
   std::filesystem::remove(path);
 }
+
+TEST_CASE("migration: 旧 group_messages 放开 role='system' 且历史行不丢") {
+  auto path = tmpDb("ac_v4_gm_system.db");
+  {
+    sqlite3* raw = nullptr;
+    std::string file = path.string();
+    REQUIRE(sqlite3_open(file.c_str(), &raw) == SQLITE_OK);
+    // 旧库形态：role 的 CHECK 只允许 user/assistant，群聊失败留痕写不进去。
+    // groups 里放一行父记录，重建后的 FK 校验才有依据。
+    const char* sql =
+        "CREATE TABLE groups ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  name TEXT NOT NULL,"
+        "  topic TEXT NOT NULL DEFAULT '',"
+        "  status TEXT NOT NULL DEFAULT 'idle',"
+        "  created_at TEXT NOT NULL,"
+        "  updated_at TEXT NOT NULL);"
+        "INSERT INTO groups(id,name,created_at,updated_at) VALUES(1,'旧群','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');"
+        "CREATE TABLE group_messages ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  group_id INTEGER NOT NULL,"
+        "  bot_id INTEGER,"
+        "  role TEXT NOT NULL CHECK(role IN ('user','assistant')),"
+        "  content TEXT NOT NULL,"
+        "  created_at TEXT NOT NULL);"
+        "INSERT INTO group_messages(group_id,bot_id,role,content,created_at)"
+        "  VALUES(1,1,'assistant','旧回复','2026-01-01T00:00:00Z');";
+    REQUIRE(sqlite3_exec(raw, sql, nullptr, nullptr, nullptr) == SQLITE_OK);
+    sqlite3_close(raw);
+  }
+  REQUIRE(db::open(path.string()));
+  auto rows = db::listGroupMessages(1);
+  REQUIRE(rows.size() == 1);
+  CHECK(rows[0].id == 1);
+  CHECK(rows[0].content == "旧回复");
+  auto note = db::appendGroupMessage(1, 0, "system", "⚠ 甲 回复失败：模拟网络错误");
+  CHECK(note.id > 1);
+  CHECK(db::listGroupMessages(1).size() == 2);
+  db::close();
+
+  // 幂等：升级过的库再次 open 不再重建，也不复制历史行
+  REQUIRE(db::open(path.string()));
+  CHECK(db::listGroupMessages(1).size() == 2);
+  db::close();
+  std::filesystem::remove(path);
+}

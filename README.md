@@ -7,7 +7,7 @@ Windows 桌面 AI 陪伴应用：多 Bot + 群聊围观。WPF 壳 + WebView2 前
 - **多 Bot**：创建任意数量的 Bot，各自独立的人设（名称 / 头像 / System Prompt / Temperature / 开场白）
 - **独立 API 配置**：每个 Bot 可覆盖 API Base URL / Key / 模型，留空即继承全局默认配置
 - **1v1 对话**：新会话可选 Bot，随时切换；流式打字机、Markdown + 代码高亮、复制 / 重新生成 / 删除 / 清空、自动标题
-- **群聊围观**：拉 2-10 个 Bot 进群，按顺序自动轮流连聊；实时围观、插话、暂停 / 继续 / 停止、换话题、轮数显示；单轮失败自动跳过并提示，同一 Bot 连续 3 次失败自动暂停
+- **群聊围观**：拉 2-10 个 Bot 进群，按顺序自动轮流连聊；实时围观、插话、暂停 / 继续 / 停止、换话题、轮数显示；单轮失败自动跳过并提示，同一 Bot 连续 3 次失败自动暂停；失败原因与「为什么停了」落库留痕，重开房间仍能看到（留痕不进模型上下文）
 - **会话导出**：md / json / txt
 - **四套主题**：深色（默认，深海军蓝）/ 亮色 / 樱花粉 / 午夜蓝
 - **HTTP 代理**：支持显式代理或系统代理
@@ -81,12 +81,14 @@ powershell -ExecutionPolicy Bypass -File scripts\test_api.ps1
 ```cmd
 node scripts\checks\check-reminders-ui.mjs
 node scripts\checks\check-bot-skills-ui.mjs
+node scripts\checks\check-failure-visibility.mjs
 ```
 
 - `check-reminders-ui.mjs`（109 条断言）：到期提醒的呈现与记账（一轮至多提示一条、被标 done 的那条必须就是 toast 上可见的文案、mark-done 失败不刷屏、呈现失败不记账）、detached 窗口守卫、重叠 tick 单飞、群状态回写与「进行中」徽标、后端重启后重连整表刷新。
 - `check-bot-skills-ui.mjs`（54 条断言）：技能未确认加载时禁用勾选并拒绝提交、PUT 单飞且按 Bot 分槽、PUT 失败回滚乐观缓存、Bot 编辑器与插件页共用同一个提交 helper。
+- `check-failure-visibility.mjs`（19 条断言）：单聊生成失败后错误提示不被 `refresh-after-chat` 的整表重载擦掉、切走再切回仍跟随该会话且不串会话、下一次成功不留旧疤；Bot 编辑器拦下越界 `max_tokens`（1–65536）与「Bot 模型 + 设置默认模型双空」；群房间重建时把后端落库的 `role=system` 失败留痕渲染成群内提示而非伪装成发言。假流按服务端真实帧序构造（`error` 之后仍会发 `done`），否则测不出「onDone 把刚记下的失败清掉」。
 
-两个脚本都接受 `--app <path>`，把被测文件指向某个历史副本即可验证「修复前的代码必须 FAIL」——断言只有能被旧代码证伪，才算证据。
+三个脚本都接受 `--app <path>`，把被测文件指向某个历史副本即可验证「修复前的代码必须 FAIL」——断言只有能被旧代码证伪，才算证据。
 
 ## 数据存储
 
@@ -97,7 +99,7 @@ node scripts\checks\check-bot-skills-ui.mjs
 | bots | Bot（含 API 覆盖项 api_base_url / api_key_enc / api_model，key 为 DPAPI 密文） |
 | sessions | 会话（bot_id 绑定 Bot，0 = 默认） |
 | messages | 单聊消息 |
-| groups / group_members / group_messages | 群 / 成员（position 即发言顺序）/ 群消息（bot_id 为 NULL = 用户插话） |
+| groups / group_members / group_messages | 群 / 成员（position 即发言顺序）/ 群消息（bot_id 为 NULL = 用户插话或 `role=system` 失败留痕；留痕只给人看，不进模型上下文与记忆提取） |
 | settings | 全局默认 API 配置、主题、代理、default_bot_id、memory_extraction（记忆提取开关）、chat_pinned（聊天置顶列表）、chat_reads（未读水位） |
 | bot_memories | Bot 记忆（bot_id / scope=private/group / group_id / content / tags / source_msg_id） |
 | bot_skills | Bot 技能开关（bot_id / skill_id / enabled / params，UNIQUE(bot_id, skill_id)，随 Bot 级联删除） |
@@ -152,7 +154,46 @@ node scripts\checks\check-bot-skills-ui.mjs
 
 另：`backend/src/event_bus.h` 定义事件总线，内置 Webhook 插件可将事件 POST 到外部地址。事件：`chat.completed` / `chat.error` / `session.created` / `session.deleted`。
 
-## 打包
+## 打包与更新指引
+
+一条命令完成「构建后端 + 跑 ctest + 发布 WPF 壳 + 部署 backend.exe + 建桌面快捷方式」：
+
+```cmd
+scripts\publish.cmd
+```
+
+产物在 `dist\Orua\`：`AiCompanion.exe`（启动器/壳）、`backend\backend.exe`、`wwwroot\`。桌面快捷方式 `Orua.lnk` 指向该 exe，工作目录即 `dist\Orua`。
+
+> **更新前必须备份数据。** `publish.cmd` 会先 `rmdir /s /q dist\Orua` 清掉旧产物，**连同 `dist\Orua\data\` 一起删除**——里面有 `app.db` / `app.db-wal` / `app.db-shm`（Bot、群、聊天记录、技能开关、提醒）、`config.json`（含 DPAPI 加密的 API Key）、`uploads\`（图片头像）、`logs\`。不备份就等于清空用户数据。
+
+更新步骤（同一台机器、同一个 Windows 用户）：
+
+```cmd
+rem 1) 先退出 Orua（壳退出时会带走它守护的 backend.exe；确认任务管理器里没有残留 backend.exe）
+rem 2) 整目录备份 data（三个 db 文件必须一起拷，WAL 里可能还有未 checkpoint 的数据）
+xcopy /e /i /y dist\Orua\data backups\dist-data-2026-11-07-pre-publish
+rem 3) 发布
+scripts\publish.cmd
+rem 4) 想保留原有 Bot / Key / 聊天记录就把 data 拷回去；想要干净起步则跳过这一步
+xcopy /e /i /y backups\dist-data-2026-11-07-pre-publish dist\Orua\data
+```
+
+`backups\` 已在 `.gitignore` 中（内含 data 副本与 DPAPI 密钥文件，切勿提交）。DPAPI 密文绑定当前 Windows 用户，换机器或换用户后旧 Key 解不开，需要重新填。
+
+发布后核对产物是否为新版（三处版本同源，运行时以 `/health` 为准）：
+
+```cmd
+curl http://127.0.0.1:8765/health
+powershell -NoProfile -Command "(Get-Item dist\Orua\AiCompanion.exe).VersionInfo | Format-List ProductName,ProductVersion,FileVersion"
+```
+
+- `/health` 返回 `{"status":"ok","version":"4.1.0"}`；启动器打开后侧栏脚注显示 `v4.1`（boot 时读 `/health` 覆盖，因此脚注反映的是**实际连上的后端**，不是 HTML 里的字面量）
+- exe 的 `ProductVersion` / `FileVersion` 来自 `AiCompanion.App.csproj` 的 `<Version>`
+- 旧库首次启动会自动迁移：`group_messages` 的 `role` CHECK 放开 `system`（失败留痕），原地重建并保留全部历史行，幂等；日志里会出现 `db: group_messages 重建以放开 role='system'`
+
+改版本号时三处一起改：`AiCompanion.App.csproj` 的 `<Version>`、`backend/src/server.cpp` 的 `/health`、`wwwroot/index.html` 的 `#foot-version` 兜底字面量。
+
+手动发布（不走脚本、不清数据）时的布局要求：
 
 ```cmd
 dotnet publish src\AiCompanion.App -c Release -r win-x64
@@ -174,7 +215,7 @@ dotnet publish src\AiCompanion.App -c Release -r win-x64
 1. 窗口标题与 UI 显示「Orua」；标题栏拖动、双击最大化/还原、右键系统菜单可用
 2. 创建 ≥3 个 Bot（含不同 API 覆盖），新建 1v1 会话可任选 Bot 流式对话
 3. 创建含 2-10 个 Bot 的群，点开聊后 Bot 按顺序自动连聊、消息流式展示；暂停 / 继续 / 停止 / 插话 / 换话题全部可用
-4. 某 Bot API 不可用时该轮显示失败气泡、群聊不中断；连续 3 次失败自动暂停
+4. 某 Bot API 不可用时该轮显示失败气泡、群聊不中断；连续 3 次失败自动暂停，失败原因与暂停原因落库，重开房间仍可见
 5. 重启程序后：Bot / 群 / 历史消息完整；群状态复位 idle 可重新开聊
 6. v1 全部既有功能回归通过；ctest 全绿 + test_api.ps1 全绿
 
@@ -208,6 +249,8 @@ dotnet publish src\AiCompanion.App -c Release -r win-x64
 8. 提醒到期前端弹出提示；HTTP 技能拒绝内网地址；文件技能超过 8KB 截断
    - 第二轮修复后已覆盖：`reminder` 写入带 Bot 归属（`bot_id` 取自会话），`due_at` 归一化为 UTC 秒级 ISO 8601；主窗口 15s 轮询到期提醒，每个周期只发一次 toast——呈现最早那条的正文，本轮仍有待发时把条数并成「（另有 N 条待提醒）」后缀，只有这条真落到 toast 元素上才记账并标完成，其余排队到下一轮（不再出现「正文被计数条覆盖」的静默丢失）
    - `http_get` 另拒绝数字简写/八进制/前导零与 IPv6 字面量（含 `[::ffff:…]`、`::1` 映射），并禁用自动重定向
-9. v1 / v2 / v3 功能与自动化测试全绿；旧库升级零破坏
+9. 失败必须可见：单聊生成失败后错误提示留在对话区（不被整表重载擦掉、切走再切回仍跟随该会话、下一次成功不留旧疤）；群聊失败原因落库，重开房间能看到为什么停了；Bot 编辑器拦下越界 `max_tokens` 与「模型名 + 设置默认模型双空」
+   - 实机验收修复波（F12）后已覆盖：单聊失败记在 `App.state.chatFailure`，`loadMessages` 重载后按会话重画错误气泡；清疤只发生在「开始新一次生成」——后端失败时仍会发 `event: done`，在 `onDone` 清疤会把刚记下的失败抹掉（真实浏览器实测抓到，stub 假流已按该帧序构造）。群聊失败以 `role=system`、`bot_id=NULL` 落库（旧库 CHECK 约束经一次性重建放开），前端重建房间时渲染成群内提示，且留痕不占「最近 12 条」上下文窗口、不进记忆提取快照。`max_tokens` 限 1–65536 整数（留空仍 2048），越界与双空模型均拦在提交前并给出可操作提示
+10. v1 / v2 / v3 功能与自动化测试全绿；旧库升级零破坏
 
 > 第 8 项备注：`reminder` 技能入库、`/api/v1/reminders?due=1` 到期查询与完成标记已由自动化覆盖（ctest + test_api.ps1）。前端已实现到期轮询与提示（主窗口 15s 轮询 → 每周期至多一条 toast → 该条落地才标完成，未见不标完成，未提示的排队到下一轮），独立聊天窗口按设计不参与提示（见「已知限制」）。实机验收仍建议以「HTTP 拒绝内网」「文件 8KB 截断」两项现场观察为准。

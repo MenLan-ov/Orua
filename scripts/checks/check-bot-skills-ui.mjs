@@ -50,7 +50,13 @@ class El {
     this._html = '';
     this._inputs = [];
     this._listeners = {};
-    this.value = '';
+    // 真实 DOM 里 input.value 读出来永远是字符串：赋数字会被强制转换。
+    // open-bot-editor 正是把 b.max_tokens（数字）赋进去，随后 save-bot 读 .value.trim()。
+    let val = '';
+    Object.defineProperty(this, 'value', {
+      get: () => val,
+      set: (v) => { val = String(v ?? ''); },
+    });
     this.textContent = '';
     this.checked = false;
     this.disabled = false;
@@ -321,6 +327,9 @@ async function caseD() {
   const setBotForm = (env, name, prompt) => {
     env.doc.getElementById('be-name').value = name;
     env.doc.getElementById('be-prompt').value = prompt;
+    // save-bot 现在要求「Bot 模型或设置默认模型」至少有一个（F12 校验），
+    // 否则根本走不到技能提交；这里给足前置条件，本组只断言技能链路。
+    env.doc.getElementById('be-api-model').value = 'gemini-3.8-flash';
   };
   const env = makeEnv();
   await env.probe(`App.run('open-bot-editor', App.state.bots[0])`);

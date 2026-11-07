@@ -58,7 +58,7 @@ struct GroupMessage {
   int64_t id = 0;
   int64_t group_id = 0;
   int64_t bot_id = 0;   // 0 = 用户插话（库内 NULL）
-  std::string role;     // "user" | "assistant"
+  std::string role;     // "user" | "assistant" | "system"（失败留痕，只给人看）
   std::string content;
   std::string created_at;
 };

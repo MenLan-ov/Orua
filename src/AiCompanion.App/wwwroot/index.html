@@ -52,7 +52,7 @@
             <span id="status-text">连接中…</span>
           </div>
           <div class="foot-buttons">
-            <span id="foot-version" class="foot-version">v3.0</span>
+            <span id="foot-version" class="foot-version">v4.1</span>
             <button id="btn-settings" class="btn-ghost">⚙ 设置</button>
             <button id="btn-quit" class="btn-ghost">退出</button>
           </div>
@@ -249,13 +249,13 @@
       <label>System Prompt</label><textarea id="be-prompt" rows="4"></textarea>
       <label>Temperature（0.1 - 2.0）</label>
       <input id="be-temp" type="number" min="0.1" max="2" step="0.1" value="0.8">
-      <label>最大 tokens</label>
-      <input id="be-max-tokens" type="number" min="1" value="2048">
+      <label>最大 tokens（1 - 65536）</label>
+      <input id="be-max-tokens" type="number" min="1" max="65536" value="2048">
       <div class="modal-section-title">API 覆盖项（留空 = 使用默认配置）</div>
       <label>API Base URL</label><input id="be-api-base" placeholder="https://api.example.com/v1">
       <label>API Key</label><input id="be-api-key" type="password" placeholder="留空 = 使用默认 Key">
       <label class="chk"><input type="checkbox" id="be-key-clear"> 清除已保存的独立 Key</label>
-      <label>模型名称</label><input id="be-api-model" placeholder="留空 = 使用默认模型">
+      <label>模型名称</label><input id="be-api-model" placeholder="留空 = 使用设置里的默认模型">
       <label>API 类型</label>
       <select id="be-api-type">
         <option value="openai">OpenAI 兼容</option>

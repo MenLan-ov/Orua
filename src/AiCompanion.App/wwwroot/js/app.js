@@ -172,6 +172,7 @@ const App = {
     defaultBotId: 0,
     selectedBotId: null,
     currentSessionId: null,
+    chatFailure: null,
     currentGroupId: null,
     currentGroup: null,
     view: 'messages',
@@ -462,6 +463,9 @@ async function loadMessages(sid) {
       messagesEl.appendChild(note);
     }
   }
+  // refresh-after-chat 会整表重载：失败提示必须跟着重载回来，否则错误被自己触发的重载擦掉。
+  const f = App.state.chatFailure;
+  if (f && f.sessionId === sid) addBubble('assistant', '').showError(f.message);
   scrollToBottom();
 }
 
@@ -548,11 +552,16 @@ App.registerCommand('save-new-session', async () => {
 });
 
 /* ================= 单聊交互 ================= */
+function markChatFailure(sid, message) {
+  App.state.chatFailure = { sessionId: sid, message };
+}
+
 App.registerCommand('send-message', async () => {
   const sid = App.state.currentSessionId;
   const content = inputEl.value.trim();
   if (!sid || !content || App.state.streaming) return;
   inputEl.value = '';
+  App.state.chatFailure = null;
   setStreamingUI(true);
   addBubble('user', content);
   scrollToBottom();
@@ -562,16 +571,22 @@ App.registerCommand('send-message', async () => {
   try {
     await consumeSse('/api/v1/chat/stream', { session_id: sid, content }, {
       onDelta: (d) => { full += d; tw.push(d); scrollToBottom(); },
+      // 后端失败时也会发 done（error 后紧跟 done），这里清疤会把刚记下的失败抹掉。
+      // 清疤只发生在「开始新一次生成」，见 send-message / regenerate 入口。
       onDone: () => { tw.finish(); App.run('refresh-after-chat'); },
       onError: (e) => {
+        const msg = e.message || '生成失败';
         tw.finish();
-        bubble.showError(e.message || '生成失败');
+        bubble.showError(msg);
+        markChatFailure(sid, msg);
         App.run('refresh-after-chat');
       },
     });
   } catch (e) {
+    const msg = e.message || '生成失败';
     tw.finish();
-    bubble.showError(e.message);
+    bubble.showError(msg);
+    markChatFailure(sid, msg);
     App.run('refresh-after-chat');
   }
 });
@@ -595,6 +610,7 @@ App.registerCommand('regenerate', async () => {
   if (App.state.streaming) { toast('正在生成中…'); return; }
   const sid = App.state.currentSessionId;
   if (!sid) return;
+  App.state.chatFailure = null;
   setStreamingUI(true);
   const bubble = addBubble('assistant', '', { streaming: true });
   let full = '';
@@ -603,11 +619,19 @@ App.registerCommand('regenerate', async () => {
     await consumeSse('/api/v1/chat/regenerate', { session_id: sid }, {
       onDelta: (d) => { full += d; tw.push(d); scrollToBottom(); },
       onDone: () => { tw.finish(); App.run('refresh-after-chat'); },
-      onError: (e) => { tw.finish(); bubble.showError(e.message || '生成失败'); App.run('refresh-after-chat'); },
+      onError: (e) => {
+        const msg = e.message || '生成失败';
+        tw.finish();
+        bubble.showError(msg);
+        markChatFailure(sid, msg);
+        App.run('refresh-after-chat');
+      },
     });
   } catch (e) {
+    const msg = e.message || '生成失败';
     tw.finish();
-    bubble.showError(e.message);
+    bubble.showError(msg);
+    markChatFailure(sid, msg);
     App.run('refresh-after-chat');
   }
 });
@@ -635,6 +659,7 @@ App.registerCommand('clear-session', async (sid) => {
   await App.api.del(`/api/v1/messages?session_id=${sid}`);
   if (sid !== App.state.currentSessionId) { toast('已清空该会话消息'); return; }
   messagesEl.innerHTML = '<div class="sysnote">开始新的对话吧 ✦</div>';
+  App.state.chatFailure = null;
 });
 
 App.registerCommand('export-session', async (sid) => {
@@ -765,16 +790,28 @@ App.registerCommand('save-bot', async () => {
   const name = $('be-name').value.trim();
   const prompt = $('be-prompt').value.trim();
   if (!name || !prompt) { toast('名称与 System Prompt 不能为空'); return; }
+  const rawMax = $('be-max-tokens').value.trim();
+  const maxTokens = rawMax === '' ? 2048 : Number(rawMax);
+  if (!Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > 65536) {
+    toast(`max_tokens 需是 1–65536 之间的整数（留空 = 2048），当前为 ${rawMax}`);
+    return;
+  }
+  const model = $('be-api-model').value.trim();
+  const defaultModel = String((App.state.config && App.state.config.model) || '').trim();
+  if (!model && !defaultModel) {
+    toast('该 Bot 未填模型名称，且设置里没有默认模型 — 请到「设置 → API」填写模型，或在此指定');
+    return;
+  }
   const body = {
     name,
     avatar: $('be-avatar').value.trim() || '🤖',
     greeting: $('be-greeting').value.trim(),
     system_prompt: prompt,
     temperature: Number($('be-temp').value) || 0.8,
-    max_tokens: Number($('be-max-tokens').value) || 2048,
+    max_tokens: maxTokens,
     api_type: $('be-api-type').value,
     api_base_url: $('be-api-base').value.trim(),
-    api_model: $('be-api-model').value.trim(),
+    api_model: model,
   };
   if ($('be-key-clear').checked) body.api_key = '';
   else if ($('be-api-key').value.trim()) body.api_key = $('be-api-key').value.trim();
@@ -960,7 +997,8 @@ async function reconcileGroupMessages() {
     el.innerHTML = '';
     App.state.gmsgSeen.clear();
     for (const m of [...msgs].reverse()) {
-      addGroupBubbleChecked(m.bot_id, m.name, m.avatar, m.content, { id: m.id, avatarUrl: m.avatar_url });
+      if (m.role === 'system') addGroupNote(m.content);
+      else addGroupBubbleChecked(m.bot_id, m.name, m.avatar, m.content, { id: m.id, avatarUrl: m.avatar_url });
     }
     scrollGroupToBottom();
   } catch (_) {}
@@ -1681,6 +1719,12 @@ App.registerCommand('boot', async () => {
       }
     }, 3000);
   }
+  // 脚注版本以后端 /health 为准：这是核对「跑的是哪份产物」的唯一运行时信号，
+  // HTML 里的字面量只是 boot 前兜底。/health 不带 code 信封，故不走 App.api。
+  try {
+    const h = await (await fetch(`${API_BASE}/health`)).json();
+    if (h && h.version) $('foot-version').textContent = 'v' + String(h.version).split('.').slice(0, 2).join('.');
+  } catch (_) {}
   try {
     App.state.config = await App.api.get('/api/v1/config');
     applyTheme(App.state.config.theme);
