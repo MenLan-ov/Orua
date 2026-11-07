@@ -72,7 +72,7 @@ README.md                           # 运行步骤 / 依赖 / 打包建议（Tas
 - Produces:
   - `logx::init(const std::string& logDir) -> bool`、`logx::info/warn/error(const std::string&)`（`logger.h`）
   - `using json = nlohmann::json;`、`okJson(data)`、`errJson(code,msg)`、`nowIso()`、`utf8Truncate(s,maxChars)`（`json_util.h`）
-  - `backend.exe --data <dir>` 启动参数约定；`GET /health` → `{"status":"ok","version":"1.0.0"}`
+  - `backend.exe --data <dir>` 启动参数约定；`GET /health` → `{"status":"ok","version":"0.1.0.0"}`
   - 目录约定：日志在 `<data>/logs/backend.log`
 
 - [ ] **Step 1: 创建 .gitignore**
@@ -239,7 +239,7 @@ int main(int argc, char** argv) {
 
   httplib::Server svr;
   svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
-    res.set_content("{\"status\":\"ok\",\"version\":\"1.0.0\"}", "application/json");
+    res.set_content("{\"status\":\"ok\",\"version\":\"0.1.0.0\"}", "application/json");
   });
 
   for (int port = 8765; port <= 8775; ++port) {
@@ -283,7 +283,7 @@ cmake --build backend/build --config Release
 ./backend/build/Release/backend.exe --data data &
 sleep 1
 curl.exe -s http://127.0.0.1:8765/health
-# 期望输出: {"status":"ok","version":"1.0.0"}
+# 期望输出: {"status":"ok","version":"0.1.0.0"}
 kill %1
 ```
 
@@ -2424,7 +2424,7 @@ void registerRoutes(httplib::Server& svr, const std::string& staticDir) {
   });
 
   svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
-    res.set_content("{\"status\":\"ok\",\"version\":\"1.0.0\"}", "application/json");
+    res.set_content("{\"status\":\"ok\",\"version\":\"0.1.0.0\"}", "application/json");
   });
 
   registerConfigRoutes(svr);

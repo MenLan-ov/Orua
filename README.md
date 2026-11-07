@@ -150,11 +150,11 @@ node scripts\checks\check-failure-visibility.mjs
 | calculator | 四则运算表达式 | 自制解析器，仅支持 `+ - * / ( )`、数字与空格；非法输入返回错误文本，**无 eval** |
 | datetime | 时间日期 | 当前时间 / 日期 / 星期，取本地系统时间，零依赖 |
 | sysinfo | 系统信息 | 内存与磁盘占用（GlobalMemoryStatusEx / GetDiskFreeSpaceExW，只读） |
-| http_get | HTTP 请求 | 仅公网 http(s)，正文 ≤2KB 截断、10s 超时；拒绝 localhost / `.localhost` / 内网段（10. / 172.16-31. / 192.168. / 169.254. / 0.）/ 回环（127.*、`::1`、`::ffff:` 映射）与数字简写主机（十进制 `2130706433`、十六进制 `0x7f000001`、八进制 `0177.0.0.1`）防 SSRF；**不跟随重定向**（3xx 直接回 `status_code` + `location`，跳转目标不会被访问）；v5 起对主机名再解析并逐 IP 复检，封死 DNS Rebinding |
-| file_read | 读取文件 | 读取指定本地文本文件，≤8KB 截断（按字节切，可能截断多字节字符，回填时按替换策略序列化），失败返回错误文本；**v5 起限制在 data 目录 / 系统临时目录 / `file_read_allowlist` 白名单内** |
+| http_get | HTTP 请求 | 仅公网 http(s)，正文 ≤2KB 截断、10s 超时；拒绝 localhost / `.localhost` / 内网段（10. / 172.16-31. / 192.168. / 169.254. / 0.）/ 回环（127.*、`::1`、`::ffff:` 映射）与数字简写主机（十进制 `2130706433`、十六进制 `0x7f000001`、八进制 `0177.0.0.1`）防 SSRF；**不跟随重定向**（3xx 直接回 `status_code` + `location`，跳转目标不会被访问）；v0.5.0 起对主机名再解析并逐 IP 复检，封死 DNS Rebinding |
+| file_read | 读取文件 | 读取指定本地文本文件，≤8KB 截断（按字节切，可能截断多字节字符，回填时按替换策略序列化），失败返回错误文本；**v0.5.0 起限制在 data 目录 / 系统临时目录 / `file_read_allowlist` 白名单内** |
 | reminder | 定时提醒 | `due_at` 支持 ISO 8601（含 `Z` / 显式时区偏移，也接受无时区的本地墙钟）与相对分钟（`15分钟后`、裸数字 `30`），统一归一化为 UTC 秒级 ISO 后写入 `reminders` 表；无法解析时返回错误文本且不入库；到期提示由主窗口轮询驱动（见「功能」与验收清单） |
 
-**已接受风险（裁决 #21，v5 已收敛 `file_read`）**：`http_get` 只保证拒绝内网/回环与数字简写主机、不跟随重定向、主机名解析复检，不做出网域名白名单；主窗口对 `file_read` 结果不做二次确认（现已受目录白名单约束）。
+**已接受风险（裁决 #21，v0.5.0 已收敛 `file_read`）**：`http_get` 只保证拒绝内网/回环与数字简写主机、不跟随重定向、主机名解析复检，不做出网域名白名单；主窗口对 `file_read` 结果不做二次确认（现已受目录白名单约束）。
 
 另：`backend/src/event_bus.h` 定义事件总线，内置 Webhook 插件可将事件 POST 到外部地址。事件：`chat.completed` / `chat.error` / `session.created` / `session.deleted`。
 
@@ -234,17 +234,6 @@ dotnet publish src\AiCompanion.App -c Release -r win-x64
 - **提醒只在应用运行期间提示**：无系统通知、无开机自启调度；应用关闭期间到期的提醒会在下次启动后按每 15s 一条逐轮提示（每轮至多一条，其余排队）。toast 是单元素提示位且 2.2s 自动隐藏，因此 N 条到期需 N×15s 才提示完，每条只有约 2.2s 可见窗，错过的内容没有回看入口（提醒仍会落库，`GET /api/v1/reminders` 可查）。
 - **群聊不启用技能**：Function calling 工具循环（≤3 轮）只在单聊生效，群聊发言不调用技能。
 
-## v4.1 变更
-
-> v4.1 不是新功能版本，而是 **v4 终验后的缺陷收口版本**：把「验证通过但用户看不见」与「失败被静默吞掉」两类问题从根上修掉。设计规格见 `docs/superpowers/specs/2026-11-06-orua-v4.1-design.md`。
-
-1. **失败必须可见**：单聊失败记入 `App.state.chatFailure`，`loadMessages` 重载后按会话重画错误气泡，清疤只在「开始新一次生成」；群聊失败原因与自动暂停原因以 `role=system`、`bot_id=NULL` 落库，重开房间可见，且不占「最近 12 条」上下文、不进记忆提取快照。
-2. **`group_messages` 放开 `role='system'`**：`CHECK` 约束不能 `ALTER`，故加一次性原地重建迁移（`PRAGMA foreign_keys=OFF` → 改名 → 新 DDL 建表 → 显式列名整行搬回 → 删旧表），幂等且数据零丢失；DDL 抽成 `kGroupMessagesDdl` 常量供建库与迁移共用。
-3. **假闭合清零**：到期提醒改为「一个 tick 只允许一次 `toast()`」，取 `due_at` 升序最早一条呈现，其余条数并成「（另有 N 条待提醒）」后缀，**该条真落地才记账并标完成**；群「进行中」徽标新增 `syncGroupStatus()` 同时回写面板态与列表数据源并重渲染，后端重连时经 `resyncGroups()` 串行整表刷新（串行是必需的——并发时 `renderChatList` 会快照到陈旧数组把旧徽标写回去）。
-4. **Bot 编辑器提交前校验**：`max_tokens` 限 1–65536 整数（留空仍 2048），模型名与设置默认模型双空时拦在提交前并指出去哪儿填；`input` 补 `max` 属性。
-5. **版本三处同源 `4.1.0`**：exe 文件/产品版本、`/health`、侧栏脚注统一；脚注 boot 时读 `/health` 覆盖，反映实际连上的后端产物，避免 UI 与产物各说各话。
-6. **可证伪闸门**：三个 stub 检查脚本（`check-reminders-ui.mjs` 109 条 / `check-bot-skills-ui.mjs` 54 条 / `check-failure-visibility.mjs` 19 条）固化进 `scripts/checks/`，断言必须能被旧代码证伪——修复前副本跑应有 FAIL，修复后全 PASS。
-
 ## v0.6.1 变更
 
 > 新增「人设」系统：把「这个 Bot 是谁」从 System Prompt 里拆出来，做成可复用、可切换的独立实体。顺带修掉窄窗口下内容区被侧栏挤成 0 的布局缺陷。
@@ -321,18 +310,18 @@ dotnet publish src\AiCompanion.App -c Release -r win-x64
 5. **`publish.cmd` 数据安全**：迁移逻辑抽为独立子程序（cmd 的 `rem` 遇全角括号会解析失败），robocopy 失败时中止发布而非删数据。
 6. **新增 `scripts\smoke_plugins.mjs`**：真实 GUI 里点「添加插件」→ 填表 → 保存 → 校验拦截 → 删除的完整链路断言，并把布局（标题不断行、区块可见）纳入检查。
 
-## v5.1 变更
+## v0.5.1 变更
 
-> v5.1 是 **v5.0 实机验收的缺陷修复版**。核心是一个从 v1 潜伏至今、所有自动化测试都没抓到的 bug。
+> v0.5.1 是 **v0.5.0 实机验收的缺陷修复版**。核心是一个从 v0.1.0 潜伏至今、所有自动化测试都没抓到的 bug。
 
-1. **聊天请求漏拼 `API_BASE`（致命）**：`consumeSse()` 从 v1 起用裸相对路径 `fetch(url)`，而页面由 WebView2 以虚拟主机 `https://app.local` 提供，请求因此被解析成 `https://app.local/api/v1/chat/stream` → `net::ERR_FILE_NOT_FOUND`，界面只显示 `Failed to fetch`——**单聊与重新生成全部不可用**。`App.api.req` 一直是 `API_BASE + path`，只有 `consumeSse` 漏拼。
+1. **聊天请求漏拼 `API_BASE`（致命）**：`consumeSse()` 从 v0.1.0 起用裸相对路径 `fetch(url)`，而页面由 WebView2 以虚拟主机 `https://app.local` 提供，请求因此被解析成 `https://app.local/api/v1/chat/stream` → `net::ERR_FILE_NOT_FOUND`，界面只显示 `Failed to fetch`——**单聊与重新生成全部不可用**。`App.api.req` 一直是 `API_BASE + path`，只有 `consumeSse` 漏拼。
    - 为何长期未被发现：所有既有测试要么用相对路径 stub，要么用 curl 直打后端，**从未在真实 WebView2 里点过「发送」**。
    - 修复：`consumeSse(path, ...)` 内部改为 `fetch(API_BASE + path)`；并把「真实点击发送且不出现 Failed to fetch」固化成 `scripts/smoke_gui.mjs` 的断言。
 2. **`build_backend.cmd` 在中文路径下误报 cmake 缺失**：VS 安装路径含中文（`D:\...\VS\本体`）时，`vswhere` 按 UTF-8 输出而 cmd 默认代码页转码成乱码，`if not exist` 判定失败，导致 `publish.cmd` 无法一键构建。修复：脚本开头 `chcp 65001`。
-3. **版本号升至 5.1.0**：exe 文件/产品版本、`/health`、侧栏脚注三处同源。
+3. **版本号升至 0.5.1.0**：exe 文件/产品版本、`/health`、侧栏脚注三处同源。
 4. **`smoke_gui.mjs` 支持 `CDP_PORT` 环境变量**，不再硬编码 9222，便于与其它调试实例并存。
 
-## v5 变更
+## v0.5.0 变更
 
 1. **`file_read` 目录白名单**：仅允许读取 data 目录、系统临时目录，以及设置表 `file_read_allowlist`（分号分隔的绝对根目录）显式追加的路径；8KB 硬截断不变，越界路径直接拒绝。
 2. **本地 API 令牌 + DNS-Rebinding 防护**：后端每次启动生成 32 字节随机令牌写入 `config.json` 与请求校验；WPF 启动注入并在后端重启（含端口回退）时重推 `auth-token` 消息，前端对 `/api/v1/*` 请求回传 `X-Orua-Token`。仅当请求带跨域 `Origin` 且令牌已启用时拦截，本机直连（curl / `test_api.ps1`）不受影响。
@@ -340,18 +329,50 @@ dotnet publish src\AiCompanion.App -c Release -r win-x64
 4. **服务端参数强校验**：`max_tokens`（1–65536）、`temperature`（0–2）、`keep_rounds`（0–100）、`proxy_port`（0–65535）均在后端收窄，绕过前端的越界值不会直接落库。
 5. **event_bus Webhook 并发节流**：有界分派（并发上限 8、队列上限 256），突发 `emit` 不再 scale 出无界线程。
 
+## v0.4.1 变更
+
+> v0.4.1 不是新功能版本，而是 **v0.4.0 终验后的缺陷收口版本**：把「验证通过但用户看不见」与「失败被静默吞掉」两类问题从根上修掉。设计规格见 `docs/superpowers/specs/2026-11-06-orua-v0.4.1-design.md`。
+
+1. **失败必须可见**：单聊失败记入 `App.state.chatFailure`，`loadMessages` 重载后按会话重画错误气泡，清疤只在「开始新一次生成」；群聊失败原因与自动暂停原因以 `role=system`、`bot_id=NULL` 落库，重开房间可见，且不占「最近 12 条」上下文、不进记忆提取快照。
+2. **`group_messages` 放开 `role='system'`**：`CHECK` 约束不能 `ALTER`，故加一次性原地重建迁移（`PRAGMA foreign_keys=OFF` → 改名 → 新 DDL 建表 → 显式列名整行搬回 → 删旧表），幂等且数据零丢失；DDL 抽成 `kGroupMessagesDdl` 常量供建库与迁移共用。
+3. **假闭合清零**：到期提醒改为「一个 tick 只允许一次 `toast()`」，取 `due_at` 升序最早一条呈现，其余条数并成「（另有 N 条待提醒）」后缀，**该条真落地才记账并标完成**；群「进行中」徽标新增 `syncGroupStatus()` 同时回写面板态与列表数据源并重渲染，后端重连时经 `resyncGroups()` 串行整表刷新（串行是必需的——并发时 `renderChatList` 会快照到陈旧数组把旧徽标写回去）。
+4. **Bot 编辑器提交前校验**：`max_tokens` 限 1–65536 整数（留空仍 2048），模型名与设置默认模型双空时拦在提交前并指出去哪儿填；`input` 补 `max` 属性。
+5. **版本三处同源 `0.4.1.0`**：exe 文件/产品版本、`/health`、侧栏脚注统一；脚注 boot 时读 `/health` 覆盖，反映实际连上的后端产物，避免 UI 与产物各说各话。
+6. **可证伪闸门**：三个 stub 检查脚本（`check-reminders-ui.mjs` 109 条 / `check-bot-skills-ui.mjs` 54 条 / `check-failure-visibility.mjs` 19 条）固化进 `scripts/checks/`，断言必须能被旧代码证伪——修复前副本跑应有 FAIL，修复后全 PASS。
+
 ## 验收清单
 
-### v2
+### v0.6.1
+
+1. 侧栏出现「人设」页签，首次启动有 3 条内置人设，带「内置」标记且不可删除。
+2. 「＋ 新建人设」打开弹窗，六个字段齐全；人设名为空或「角色设定与覆盖都为空」时拦在提交前并给出原因。
+3. 新建的人设立即出现在列表，可编辑、可删除；删除前提示哪些 Bot 正在使用它。
+4. Bot 详情页显示「当前人设」，未绑定时说明「未绑定人设 — 只使用下面的 System Prompt」；点「切换」可绑定 / 解绑。
+5. 绑定后该 Bot 的私聊与群聊都按人设回复；解绑后行为回到绑定前。
+6. 「系统提示词覆盖」填写后整体替换系统提示；留空则走拼接，Bot 原提示词不被丢弃。
+7. 删除人设后，原引用它的 Bot `persona_id` 归 0，不残留悬空引用。
+8. 窗口拖到很窄（如 900×620）时，侧栏与内容区都可用，输入框与发送按钮完整可见，无横向溢出。
+9. 后端 `backend_tests` 109 用例 / 883 断言全通过；三个 stub 闸门 109 / 54 / 19 全通过；`e2e_persona_v061.mjs` 16 条全通过。
+10. 版本号三处同源 `0.6.1`：exe 文件版本 `0.6.1.0`、`/health` 返回 `0.6.1`、侧栏脚注显示 `v0.6.1`。
+
+### v0.1.0
+
+1. 窗口能启动，显示「Orua」标题；标题栏拖动、双击最大化 / 还原、右键系统菜单可用。
+2. 能配置 API（地址 / Key / 模型）并保存；Key 以掩码返回（`sk-***abc`）。
+3. 能创建 Bot 并与它进行 1v1 流式对话，回复逐字出现。
+4. 重启程序后配置与历史消息仍在。
+5. `/health` 返回 `{"status":"ok","version":"0.1.0.0"}`；侧栏脚注显示 `v0.1.0`。
+
+### v0.2.0
 
 1. 窗口标题与 UI 显示「Orua」；标题栏拖动、双击最大化/还原、右键系统菜单可用
 2. 创建 ≥3 个 Bot（含不同 API 覆盖），新建 1v1 会话可任选 Bot 流式对话
 3. 创建含 2-10 个 Bot 的群，点开聊后 Bot 按顺序自动连聊、消息流式展示；暂停 / 继续 / 停止 / 插话 / 换话题全部可用
 4. 某 Bot API 不可用时该轮显示失败气泡、群聊不中断；连续 3 次失败自动暂停，失败原因与暂停原因落库，重开房间仍可见
 5. 重启程序后：Bot / 群 / 历史消息完整；群状态复位 idle 可重新开聊
-6. v1 全部既有功能回归通过；ctest 全绿 + test_api.ps1 全绿
+6. v0.1.0 全部既有功能回归通过；ctest 全绿 + test_api.ps1 全绿
 
-### v3
+### v0.3.0
 
 1. 全 UI（含 README、验收清单）无旧称字样，统一显示「Bot」
 2. 新建 Bot 弹窗含全部字段（名字/头像/API 类型/地址/Key/模型/温度/最大 tokens）+ 开场白 + 提示词/人设；创建后可在详情页随时修改
@@ -363,9 +384,9 @@ dotnet publish src\AiCompanion.App -c Release -r win-x64
 8. 记忆库搜索/编辑/删除即时生效；删除后注入立即停止
 9. `memory_extraction` 关闭后不再新增记忆，已有记忆仍注入
 10. 记忆提取/检索失败时聊天与群聊功能正常（静默降级）
-11. v2 全部功能与自动化测试保持全绿；老库迁移零破坏
+11. v0.2.0 全部功能与自动化测试保持全绿；老库迁移零破坏
 
-### v4
+### v0.4.0
 
 1. 侧栏页签为「聊天 / Bot / 记忆 / 插件」；聊天页单聊与群聊同一列表，QQ 好友式布局（置顶区 + 按最近活跃排序）
 2. 每个 Bot 一个聊天项，点击进入其最近会话（无会话时自动创建）；同一 Bot 的多会话入口在右键菜单
@@ -383,40 +404,40 @@ dotnet publish src\AiCompanion.App -c Release -r win-x64
    - `http_get` 另拒绝数字简写/八进制/前导零与 IPv6 字面量（含 `[::ffff:…]`、`::1` 映射），并禁用自动重定向
 9. 失败必须可见：单聊生成失败后错误提示留在对话区（不被整表重载擦掉、切走再切回仍跟随该会话、下一次成功不留旧疤）；群聊失败原因落库，重开房间能看到为什么停了；Bot 编辑器拦下越界 `max_tokens` 与「模型名 + 设置默认模型双空」
    - 实机验收修复波（F12）后已覆盖：单聊失败记在 `App.state.chatFailure`，`loadMessages` 重载后按会话重画错误气泡；清疤只发生在「开始新一次生成」——后端失败时仍会发 `event: done`，在 `onDone` 清疤会把刚记下的失败抹掉（真实浏览器实测抓到，stub 假流已按该帧序构造）。群聊失败以 `role=system`、`bot_id=NULL` 落库（旧库 CHECK 约束经一次性重建放开），前端重建房间时渲染成群内提示，且留痕不占「最近 12 条」上下文窗口、不进记忆提取快照。`max_tokens` 限 1–65536 整数（留空仍 2048），越界与双空模型均拦在提交前并给出可操作提示
-10. v1 / v2 / v3 功能与自动化测试全绿；旧库升级零破坏
+10. v0.1.0 / v0.2.0 / v0.3.0 功能与自动化测试全绿；旧库升级零破坏
 
 > 第 8 项备注：`reminder` 技能入库、`/api/v1/reminders?due=1` 到期查询与完成标记已由自动化覆盖（ctest + test_api.ps1）。前端已实现到期轮询与提示（主窗口 15s 轮询 → 每周期至多一条 toast → 该条落地才标完成，未见不标完成，未提示的排队到下一轮），独立聊天窗口按设计不参与提示（见「已知限制」）。实机验收仍建议以「HTTP 拒绝内网」「文件 8KB 截断」两项现场观察为准。
 
-### v4.1
+### v0.4.1
 
 1. 单聊生成失败后错误提示留在对话区（不被整表重载擦掉、切走再切回仍跟随该会话、下一次成功不留旧疤）
 2. 群聊失败原因落库，重开房间能看到为什么停了；留痕渲染成群内提示，不伪装成用户 / Bot 消息
 3. Bot 编辑器拦下越界 `max_tokens`（1–65536 整数，留空仍 2048）与「模型名 + 设置默认模型双空」，提示可操作
 4. 到期提醒每 tick 至多一条 toast 真正可见；正文与待发计数合并进同一条；未见不标完成，其余排队到下一轮
 5. 群「进行中」徽标随运行状态实时出现 / 消失；后端重启后陈旧徽标被整表刷新清除；持续在线不重复刷新（无抖动）；detached 窗口不代主窗口刷新
-6. 版本三处统一 `4.1.0`（exe 文件/产品版本、`/health`、侧栏脚注），脚注 boot 时读 `/health` 覆盖
+6. 版本三处统一 `0.4.1.0`（exe 文件/产品版本、`/health`、侧栏脚注），脚注 boot 时读 `/health` 覆盖
 7. README 含「打包与更新指引」，明确 `publish.cmd` 会连 `data` 一起清掉、需备份与回拷
 8. 三个 stub 闸门全 PASS（修复前副本应 FAIL）：提醒 109 条、技能 54 条、失败可见性 19 条
-9. `ctest` 全绿（v4.1 当时基线 82 用例 / 695 断言；v5 追加 `test_v5.cpp` 后为 91 / 777）；`test_api.ps1` PASSED；WPF 构建 0 警告 0 错误；v1–v4 功能与自动化测试全绿；旧库升级零破坏
+9. `ctest` 全绿（v0.4.1 当时基线 82 用例 / 695 断言；v0.5.0 追加 `test_v5.cpp` 后为 91 / 777）；`test_api.ps1` PASSED；WPF 构建 0 警告 0 错误；v0.1.0–v0.4.0 功能与自动化测试全绿；旧库升级零破坏
 
-### v5
+### v0.5.0
 
 1. `file_read` 仅允许 data 目录 / 系统临时目录 / `file_read_allowlist` 白名单，越界路径拒绝（ctest 覆盖）
 2. 后端每启动生成随机令牌；前端经 WPF 注入后对 `/api/v1/*` 请求回传 `X-Orua-Token`；带跨域 Origin 且令牌已启用时校验，无 Origin 直连不受影响（test_api.ps1 全绿）
 3. `http_get` 主机名解析后逐 IP 复检（DNS-Rebinding），不跟随重定向，SSRF 约束不回归（ctest 覆盖）
 4. `max_tokens` / `temperature` / `keep_rounds` / `proxy_port` 服务端收窄（ctest 覆盖）
 5. event_bus Webhook 有界分派（并发 ≤8、队列 ≤256），单次 emit 仍 ≤400ms 送达（ctest 覆盖）
-6. v1–v4.1 功能与自动化测试全绿；版本号三处 5.0.0
+6. v0.1.0–v0.4.1 功能与自动化测试全绿；版本号三处 0.5.0.0
 
-### v5.1
+### v0.5.1
 
 1. 单聊「发送」在真实 WebView2 中可用：请求打到 `http://127.0.0.1:<port>/api/v1/chat/stream`，不再出现 `Failed to fetch`（`smoke_gui.mjs` 真实点击断言覆盖）
 2. 「重新生成」可用（与单聊同走 `consumeSse`，同一修复）
 3. 全部 5 处 `fetch` 均以 `API_BASE` 开头，无裸相对路径请求
 4. `scripts\build_backend.cmd` 在 VS 安装路径含中文时能正确找到 cmake/ctest，`publish.cmd` 一键跑通
-5. `dist\Orua\AiCompanion.exe` 文件版本为 `5.1.0.0`、产品名 `Orua`；`/health` 返回 `5.1.0`；侧栏脚注显示 `v5.1`
+5. `dist\Orua\AiCompanion.exe` 文件版本为 `0.5.1.0`、产品名 `Orua`；`/health` 返回 `0.5.1.0`；侧栏脚注显示 `v0.5.1`
 6. `smoke_gui.mjs` 支持 `CDP_PORT` 环境变量
-7. v1–v5.0 功能与自动化测试全绿（ctest 91 用例 / 777 断言、三个 stub 闸门 109/54/19、`test_api.ps1`）
+7. v0.1.0–v0.5.0 功能与自动化测试全绿（ctest 91 用例 / 777 断言、三个 stub 闸门 109/54/19、`test_api.ps1`）
 
 ### v0.5.2
 
@@ -428,4 +449,18 @@ dotnet publish src\AiCompanion.App -c Release -r win-x64
 6. 插件热重载：新增/删除后日志出现新的 `plugins loaded: N`，无需重启后端
 7. 删除插件后列表与 `config.json` 同步移除
 8. 版本号三处同源 `0.5.2`：exe 文件版本 `0.5.2.0`、`/health` 返回 `0.5.2`、侧栏脚注完整显示 `v0.5.2`（不再截断成 `v0.5`）
-9. v1–v5.1 功能与自动化测试全绿（ctest 95 用例 / 793 断言、三个 stub 闸门 109/54/19、`test_api.ps1`、`smoke_gui.mjs`、`smoke_plugins.mjs`）
+9. v0.1.0–v0.5.1 功能与自动化测试全绿（ctest 95 用例 / 793 断言、三个 stub 闸门 109/54/19、`test_api.ps1`、`smoke_gui.mjs`、`smoke_plugins.mjs`）
+### v0.5.3
+
+1. 插件页标题、搜索、`N / M 生效` 徽章、「刷新」、「+ 添加插件」齐全，两组（内置技能 / 自制插件）各带条数。
+2. 搜索框按名称 / 简介过滤，清空后恢复全部。
+3. 每张卡片有齿轮按钮；技能卡打开参数弹窗，插件卡打开设置弹窗（订阅事件 + 生效 Bot 多选 + 启用开关）。
+4. 「生效 Bot」不选 = 全部 Bot；选了则卡片显示具体 Bot 名。
+5. 「测试连接」对可达地址返回 `ok:true` 与耗时；对不可达地址返回失败原因，不阻塞界面。
+6. ↑ 调整插件顺序并持久化；首项按钮禁用。
+7. 插件停用后卡片显示「已停用」，且不再投递事件。
+8. 重新勾选技能后，此前保存的参数仍在。
+9. https 地址可被正确解析并投递。
+10. 后端 `backend_tests` 102 用例 / 827 断言全通过；三个 stub 闸门 109 / 54 / 19 全通过；`smoke_plugins_v053.mjs` 21 条、`smoke_v053_features.mjs` 13 条全通过。
+11. 版本号三处同源 `0.5.3`：exe 文件版本 `0.5.3.0`、`/health` 返回 `0.5.3`、侧栏脚注显示 `v0.5.3`。
+

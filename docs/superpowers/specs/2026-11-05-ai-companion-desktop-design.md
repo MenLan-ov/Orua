@@ -9,7 +9,7 @@
 ### 1.1 目标
 Windows 桌面 AI 陪伴程序：用户连接外部 OpenAI 兼容大模型 API，通过自定义人设、上下文记忆、流式对话获得陪伴式聊天体验。对话记录、人设、配置全部存储在本地 SQLite。
 
-### 1.2 核心功能（v1）
+### 1.2 核心功能（v0.1.0）
 1. 配置 API Base URL、API Key（DPAPI 加密存储）、模型名称、HTTP 代理
 2. 自定义人设：名称、头像（emoji）、开场白、System Prompt、temperature；支持增删改、切换、激活
 3. 多会话管理：新建、切换、重命名、删除会话；首条消息自动生成标题
@@ -20,7 +20,7 @@ Windows 桌面 AI 陪伴程序：用户连接外部 OpenAI 兼容大模型 API�
 8. 多主题 UI（默认深色，设置内切换）
 9. WPF 启动时自动拉起后端，后端崩溃自动重启（最多 3 次，指数退避），运行日志落盘
 
-### 1.3 非目标（v1 不做）
+### 1.3 非目标（v0.1.0 不做）
 - 本地模型推理（接口已预留 provider 抽象）
 - TTS 语音、系统托盘、开机自启
 - 滚动摘要式长期记忆
@@ -120,7 +120,7 @@ D:\One\
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/health` | `{"status":"ok","version":"1.0.0"}` |
+| GET | `/health` | `{"status":"ok","version":"0.1.0.0"}` |
 | GET | `/api/v1/config` | 读取配置；api_key 返回掩码 `sk-***abc`，proxy 等一并返回 |
 | POST | `/api/v1/config` | 保存配置；api_key 传空字符串表示不变更 |
 | GET | `/api/v1/personas` | 人设列表（含 is_active） |
@@ -234,7 +234,7 @@ CREATE TABLE IF NOT EXISTS settings (
    };
    ```
    将来加本地推理 = 新增一个 `LocalInferenceProvider` 实现并在工厂注册，路由层零改动。
-2. **`EventBus` + Webhook 插件**：v1 只做内置事件总线 + config.json 插件清单分发（语言无关，任何进程可接收）。事件类型：`chat.completed`、`chat.error`、`session.created`、`session.deleted`、`persona.activated`。事件 JSON 统一含 `{type, ts, data}`。
+2. **`EventBus` + Webhook 插件**：v0.1.0 只做内置事件总线 + config.json 插件清单分发（语言无关，任何进程可接收）。事件类型：`chat.completed`、`chat.error`、`session.created`、`session.deleted`、`persona.activated`。事件 JSON 统一含 `{type, ts, data}`。
 3. **REST 版本化**：所有业务接口走 `/api/v1/`，未来破坏性变更走 `/api/v2/` 并存。
 4. **存储层接口**：`db.h` 只暴露领域函数（`createSession/appendMessage/listMessages/...`），不泄露 SQL 细节；将来换存储实现只改 `db.cpp`。
 
