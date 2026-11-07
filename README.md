@@ -74,6 +74,20 @@ powershell -ExecutionPolicy Bypass -File scripts\test_api.ps1
 
 输出 `CRUD API TESTS PASSED` 即通过（覆盖 bots/groups CRUD、群 SSE ≥2 轮、插话、会话 bot 绑定、单聊流/重新生成/导出/清空、私聊/群聊记忆提取、记忆 CRUD/搜索、头像上传、memory_extraction 配置、skills/bot_skills 回环、技能全链路（tool_call → 执行 → 回填 → 「计算结果：2」）、reminders 到期查询与完成、chat_pinned/chat_reads 配置等）。测试用独立数据目录 `data_e2e`，不影响 `data/` 用户数据。
 
+### 前端回归 stub 检查
+
+直接评估 `src/AiCompanion.App/wwwroot/js/app.js`，不启动真实后端、不读写 `data/`，全部数据来自脚本内置的假后端 stub：
+
+```cmd
+node scripts\checks\check-reminders-ui.mjs
+node scripts\checks\check-bot-skills-ui.mjs
+```
+
+- `check-reminders-ui.mjs`（109 条断言）：到期提醒的呈现与记账（一轮至多提示一条、被标 done 的那条必须就是 toast 上可见的文案、mark-done 失败不刷屏、呈现失败不记账）、detached 窗口守卫、重叠 tick 单飞、群状态回写与「进行中」徽标、后端重启后重连整表刷新。
+- `check-bot-skills-ui.mjs`（54 条断言）：技能未确认加载时禁用勾选并拒绝提交、PUT 单飞且按 Bot 分槽、PUT 失败回滚乐观缓存、Bot 编辑器与插件页共用同一个提交 helper。
+
+两个脚本都接受 `--app <path>`，把被测文件指向某个历史副本即可验证「修复前的代码必须 FAIL」——断言只有能被旧代码证伪，才算证据。
+
 ## 数据存储
 
 `data/app.db`（SQLite，WAL）：
