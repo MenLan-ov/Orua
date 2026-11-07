@@ -23,6 +23,7 @@ ServerConfig load(const std::string& path) {
       c.port = s.value("port", c.port);
       c.actual_port = s.value("actual_port", c.actual_port);
       c.static_dir = s.value("static_dir", c.static_dir);
+      c.auth_token = s.value("auth_token", c.auth_token);
     }
     if (j.contains("defaults")) {
       auto& d = j["defaults"];
@@ -55,7 +56,8 @@ void save(const std::string& path, const ServerConfig& c) {
        {{"host", c.host},
         {"port", c.port},
         {"actual_port", c.actual_port},
-        {"static_dir", c.static_dir}}},
+        {"static_dir", c.static_dir},
+        {"auth_token", c.auth_token}}},
       {"defaults",
        {{"keep_rounds", c.keep_rounds},
         {"theme", c.theme},

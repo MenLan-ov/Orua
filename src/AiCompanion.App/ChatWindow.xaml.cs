@@ -69,7 +69,8 @@ public partial class ChatWindow : Window
             "app.local", WwwrootDir, CoreWebView2HostResourceAccessKind.Allow);
         await WebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
             $"window.__API_BASE__ = 'http://127.0.0.1:{_apiPort}';" +
-            $"window.__DETACH_TARGET__ = {JsonSerializer.Serialize(_target)};");
+            $"window.__DETACH_TARGET__ = {JsonSerializer.Serialize(_target)};" +
+            $"window.__ORUA_TOKEN__ = {JsonSerializer.Serialize(MainWindow.ReadAuthToken())};");
         WebView.CoreWebView2.Navigate(
             "https://app.local/index.html?window=detached&target=" +
             System.Uri.EscapeDataString(_target));

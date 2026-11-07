@@ -664,6 +664,7 @@ std::vector<GroupMessage> listGroupMessages(int64_t groupId, int limit) {
 
 std::optional<std::string> getSetting(const std::string& key) {
   std::lock_guard<std::recursive_mutex> lock(g_mtx);
+  if (!g_db) return std::nullopt;   // 未打开数据库（测试直调 fileReadAllowed 等）时安全返回空
   std::optional<std::string> out;
   query("SELECT value FROM settings WHERE key=?", {key},
         [&](sqlite3_stmt* st) { out = colText(st, 0); });

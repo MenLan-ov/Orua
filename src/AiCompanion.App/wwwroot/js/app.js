@@ -2,6 +2,14 @@
 'use strict';
 
 const API_BASE = (window.__API_BASE__ || 'http://127.0.0.1:8765').replace(/\/$/, '');
+// v5：本地 API 令牌（由 WPF 在每个会话启动/后端重启时注入），用于跨域请求的 X-Orua-Token 头
+var __ORUA_TOKEN = window.__ORUA_TOKEN__ || '';
+
+function authHeaders(extra = {}) {
+  const h = Object.assign({}, extra);
+  if (__ORUA_TOKEN) h['X-Orua-Token'] = __ORUA_TOKEN;
+  return h;
+}
 
 function botAvatarHtml(b, cls = 'avatar-img') {
   if (b && b.avatar_url) return `<img class="${cls}" src="${API_BASE}/api/v1/bots/${b.id}/avatar">`;
@@ -118,7 +126,7 @@ async function consumeSse(url, body, handlers) {
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
       signal: ctrl.signal,
     });
@@ -208,7 +216,7 @@ const App = {
   },
   api: {
     async req(method, path, body) {
-      const opts = { method, headers: { 'Content-Type': 'application/json' } };
+      const opts = { method, headers: authHeaders({ 'Content-Type': 'application/json' }) };
       if (body !== undefined) opts.body = JSON.stringify(body);
       const res = await fetch(API_BASE + path, opts);
       let json = null;
@@ -667,7 +675,7 @@ App.registerCommand('export-session', async (sid) => {
   if (!sid) { toast('请先选择会话'); return; }
   const fmt = await promptText('导出格式（md / json / txt）', 'md');
   if (!['md', 'json', 'txt'].includes(fmt)) return;
-  const res = await fetch(`${API_BASE}/api/v1/export?session_id=${sid}&format=${fmt}`, { method: 'POST' });
+  const res = await fetch(`${API_BASE}/api/v1/export?session_id=${sid}&format=${fmt}`, { method: 'POST', headers: authHeaders() });
   if (!res.ok) { toast('导出失败'); return; }
   const blob = await res.blob();
   const a = document.createElement('a');
@@ -1067,7 +1075,7 @@ async function openGroupStream(gid) {
   const ctrl = new AbortController();
   App.state.groupAbort = ctrl;
   try {
-    const res = await fetch(`${API_BASE}/api/v1/groups/${gid}/stream`, { signal: ctrl.signal });
+    const res = await fetch(`${API_BASE}/api/v1/groups/${gid}/stream`, { signal: ctrl.signal, headers: authHeaders() });
     if (!res.ok || !res.body) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.message || `HTTP ${res.status}`);
@@ -1789,6 +1797,7 @@ if (wv) {
     try {
       const m = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
       if (m.type === 'backend-status') App.run('backend-status', m.payload);
+      else if (m.type === 'auth-token') __ORUA_TOKEN = (m.payload && m.payload.token) || '';
     } catch (_) {}
   });
 }

@@ -1,4 +1,5 @@
 #pragma once
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -17,13 +18,29 @@ class EventBus {
 
   void loadPlugins(const std::vector<cfg::Plugin>& plugins);
   void subscribe(Listener l);
-  // 同步通知本进程监听者；异步 fire-and-forget 分发到匹配事件的插件 Webhook
+  // 同步通知本进程监听者；异步分发到匹配事件的插件 Webhook（v5：有界分派，不无限开线程）
   void emit(const std::string& type, const json& data);
 
  private:
+  struct WebhookJob {
+    std::string name;
+    std::string url;
+    std::string body;
+  };
+
   std::mutex mtx_;
   std::vector<Listener> listeners_;
   std::vector<cfg::Plugin> plugins_;
+
+  // Webhook 有界分派：并发上限 + 有界队列，突发 emit 不会 scale 出无限线程。
+  std::mutex wm_;
+  size_t inflight_ = 0;
+  size_t queued_ = 0;
+  std::deque<WebhookJob> pending_;
+
+  void scheduleWebhook(const std::string& name, const std::string& url,
+                       const std::string& body);
+  void finishWebhook();
 };
 
 }  // namespace ev

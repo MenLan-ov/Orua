@@ -44,6 +44,7 @@ add_executable(backend_tests
   tests/test_event_bus.cpp
   tests/test_group_engine.cpp
   tests/test_memory_service.cpp
+  tests/test_v5.cpp
   src/db.cpp
   src/config.cpp
   src/dpapi_util.cpp

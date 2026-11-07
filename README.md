@@ -146,11 +146,11 @@ node scripts\checks\check-failure-visibility.mjs
 | calculator | 四则运算表达式 | 自制解析器，仅支持 `+ - * / ( )`、数字与空格；非法输入返回错误文本，**无 eval** |
 | datetime | 时间日期 | 当前时间 / 日期 / 星期，取本地系统时间，零依赖 |
 | sysinfo | 系统信息 | 内存与磁盘占用（GlobalMemoryStatusEx / GetDiskFreeSpaceExW，只读） |
-| http_get | HTTP 请求 | 仅公网 http(s)，正文 ≤2KB 截断、10s 超时；拒绝 localhost / `.localhost` / 内网段（10. / 172.16-31. / 192.168. / 169.254. / 0.）/ 回环（127.*、`::1`、`::ffff:` 映射）与数字简写主机（十进制 `2130706433`、十六进制 `0x7f000001`、八进制 `0177.0.0.1`）防 SSRF；**不跟随重定向**（3xx 直接回 `status_code` + `location`，跳转目标不会被访问） |
-| file_read | 读取文件 | 读取指定本地文本文件，≤8KB 截断（按字节切，可能截断多字节字符，回填时按替换策略序列化），失败返回错误文本；**未做目录沙箱**（见下方已接受风险） |
+| http_get | HTTP 请求 | 仅公网 http(s)，正文 ≤2KB 截断、10s 超时；拒绝 localhost / `.localhost` / 内网段（10. / 172.16-31. / 192.168. / 169.254. / 0.）/ 回环（127.*、`::1`、`::ffff:` 映射）与数字简写主机（十进制 `2130706433`、十六进制 `0x7f000001`、八进制 `0177.0.0.1`）防 SSRF；**不跟随重定向**（3xx 直接回 `status_code` + `location`，跳转目标不会被访问）；v5 起对主机名再解析并逐 IP 复检，封死 DNS Rebinding |
+| file_read | 读取文件 | 读取指定本地文本文件，≤8KB 截断（按字节切，可能截断多字节字符，回填时按替换策略序列化），失败返回错误文本；**v5 起限制在 data 目录 / 系统临时目录 / `file_read_allowlist` 白名单内** |
 | reminder | 定时提醒 | `due_at` 支持 ISO 8601（含 `Z` / 显式时区偏移，也接受无时区的本地墙钟）与相对分钟（`15分钟后`、裸数字 `30`），统一归一化为 UTC 秒级 ISO 后写入 `reminders` 表；无法解析时返回错误文本且不入库；到期提示由主窗口轮询驱动（见「功能」与验收清单） |
 
-**已接受风险（裁决 #21）**：`file_read` 可读取 Bot 被要求读取的**任意本地路径**（仅 ≤8KB 截断，未做工作目录白名单/目录沙箱）。本轮终验决定不加沙箱，是否收敛为「仅工作目录」由用户后续决定；主窗口对 `file_read` 结果不做二次确认。同理 `http_get` 只保证拒绝内网/回环与数字简写主机、不跟随重定向，不做出网白名单。
+**已接受风险（裁决 #21，v5 已收敛 `file_read`）**：`http_get` 只保证拒绝内网/回环与数字简写主机、不跟随重定向、主机名解析复检，不做出网域名白名单；主窗口对 `file_read` 结果不做二次确认（现已受目录白名单约束）。
 
 另：`backend/src/event_bus.h` 定义事件总线，内置 Webhook 插件可将事件 POST 到外部地址。事件：`chat.completed` / `chat.error` / `session.created` / `session.deleted`。
 
@@ -187,7 +187,7 @@ curl http://127.0.0.1:8765/health
 powershell -NoProfile -Command "(Get-Item dist\Orua\AiCompanion.exe).VersionInfo | Format-List ProductName,ProductVersion,FileVersion"
 ```
 
-- `/health` 返回 `{"status":"ok","version":"4.1.0"}`；启动器打开后侧栏脚注显示 `v4.1`（boot 时读 `/health` 覆盖，因此脚注反映的是**实际连上的后端**，不是 HTML 里的字面量）
+- `/health` 返回 `{"status":"ok","version":"5.0.0"}`；启动器打开后侧栏脚注显示 `v5.0`（boot 时读 `/health` 覆盖，因此脚注反映的是**实际连上的后端**，不是 HTML 里的字面量）
 - exe 的 `ProductVersion` / `FileVersion` 来自 `AiCompanion.App.csproj` 的 `<Version>`
 - 旧库首次启动会自动迁移：`group_messages` 的 `role` CHECK 放开 `system`（失败留痕），原地重建并保留全部历史行，幂等；日志里会出现 `db: group_messages 重建以放开 role='system'`
 
@@ -206,7 +206,14 @@ dotnet publish src\AiCompanion.App -c Release -r win-x64
 - **独立聊天窗口不弹提醒 toast**：到期提醒轮询只在主窗口启动，detached 窗口不发轮询、不提示、也不标完成；提醒仍会正常入库，并在主窗口下一次轮询时提示。这是有意限制——避免多个窗口重复提示、重复 `POST /reminders/{id}/done` 竞争。
 - **提醒只在应用运行期间提示**：无系统通知、无开机自启调度；应用关闭期间到期的提醒会在下次启动后按每 15s 一条逐轮提示（每轮至多一条，其余排队）。toast 是单元素提示位且 2.2s 自动隐藏，因此 N 条到期需 N×15s 才提示完，每条只有约 2.2s 可见窗，错过的内容没有回看入口（提醒仍会落库，`GET /api/v1/reminders` 可查）。
 - **群聊不启用技能**：Function calling 工具循环（≤3 轮）只在单聊生效，群聊发言不调用技能。
-- **`file_read` 无目录沙箱**：见「插件」小节的已接受风险说明（裁决 #21，本轮不收敛）。
+
+## v5 变更
+
+1. **`file_read` 目录白名单**：仅允许读取 data 目录、系统临时目录，以及设置表 `file_read_allowlist`（分号分隔的绝对根目录）显式追加的路径；8KB 硬截断不变，越界路径直接拒绝。
+2. **本地 API 令牌 + DNS-Rebinding 防护**：后端每次启动生成 32 字节随机令牌写入 `config.json` 与请求校验；WPF 启动注入并在后端重启（含端口回退）时重推 `auth-token` 消息，前端对 `/api/v1/*` 请求回传 `X-Orua-Token`。仅当请求带跨域 `Origin` 且令牌已启用时拦截，本机直连（curl / `test_api.ps1`）不受影响。
+3. **`http_get` 解析复检**：hostname 通过 `isBlockedHost` 后，仍解析出全部真实 IP 并逐个复检，封死「先公网、后切回内网」的 rebinding；不跟随重定向。
+4. **服务端参数强校验**：`max_tokens`（1–65536）、`temperature`（0–2）、`keep_rounds`（0–100）、`proxy_port`（0–65535）均在后端收窄，绕过前端的越界值不会直接落库。
+5. **event_bus Webhook 并发节流**：有界分派（并发上限 8、队列上限 256），突发 `emit` 不再 scale 出无界线程。
 
 ## 验收清单
 
@@ -254,3 +261,12 @@ dotnet publish src\AiCompanion.App -c Release -r win-x64
 10. v1 / v2 / v3 功能与自动化测试全绿；旧库升级零破坏
 
 > 第 8 项备注：`reminder` 技能入库、`/api/v1/reminders?due=1` 到期查询与完成标记已由自动化覆盖（ctest + test_api.ps1）。前端已实现到期轮询与提示（主窗口 15s 轮询 → 每周期至多一条 toast → 该条落地才标完成，未见不标完成，未提示的排队到下一轮），独立聊天窗口按设计不参与提示（见「已知限制」）。实机验收仍建议以「HTTP 拒绝内网」「文件 8KB 截断」两项现场观察为准。
+
+### v5
+
+1. `file_read` 仅允许 data 目录 / 系统临时目录 / `file_read_allowlist` 白名单，越界路径拒绝（ctest 覆盖）
+2. 后端每启动生成随机令牌；前端经 WPF 注入后对 `/api/v1/*` 请求回传 `X-Orua-Token`；带跨域 Origin 且令牌已启用时校验，无 Origin 直连不受影响（test_api.ps1 全绿）
+3. `http_get` 主机名解析后逐 IP 复检（DNS-Rebinding），不跟随重定向，SSRF 约束不回归（ctest 覆盖）
+4. `max_tokens` / `temperature` / `keep_rounds` / `proxy_port` 服务端收窄（ctest 覆盖）
+5. event_bus Webhook 有界分派（并发 ≤8、队列 ≤256），单次 emit 仍 ≤400ms 送达（ctest 覆盖）
+6. v1–v4 功能与自动化测试全绿；版本号三处 5.0.0

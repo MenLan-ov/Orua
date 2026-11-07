@@ -66,12 +66,31 @@ public partial class MainWindow : Window
         }
     }
 
+    internal static string ReadAuthToken()
+    {
+        var cfgPath = Path.Combine(DataDir, "config.json");
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(cfgPath));
+            var srv = doc.RootElement.GetProperty("server");
+            if (srv.TryGetProperty("auth_token", out var tok) && tok.ValueKind == JsonValueKind.String)
+                return tok.GetString() ?? "";
+        }
+        catch { }
+        return "";
+    }
+
     private void OnBackendStatusChanged(string status, string detail)
     {
         if (status == "down")
             PostToJs(new { type = BridgeProtocol.MsgBackendStatus, payload = new { status = "down", detail } });
         else if (status == "up")
+        {
+            // 后端每次重启都会重新生成令牌 → 重读 config.json 并推给前端
+            var token = ReadAuthToken();
             PostToJs(new { type = BridgeProtocol.MsgBackendStatus, payload = new { status = "up", detail = "" } });
+            PostToJs(new { type = BridgeProtocol.MsgAuthToken, payload = new { token } });
+        }
     }
 
     private void PostToJs(object msg)
@@ -96,8 +115,9 @@ public partial class MainWindow : Window
         WebView.CoreWebView2.SetVirtualHostNameToFolderMapping(
             "app.local", WwwrootDir, CoreWebView2HostResourceAccessKind.Allow);
         int port = _backend?.ApiPort ?? ReadApiPort();
+        string token = ReadAuthToken();
         await WebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
-            $"window.__API_BASE__ = 'http://127.0.0.1:{port}';");
+            $"window.__API_BASE__ = 'http://127.0.0.1:{port}'; window.__ORUA_TOKEN__ = {JsonSerializer.Serialize(token)};");
         WebView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
         WebView.CoreWebView2.Navigate("https://app.local/index.html");
     }

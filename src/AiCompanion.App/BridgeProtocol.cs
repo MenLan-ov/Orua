@@ -5,6 +5,7 @@ public static class BridgeProtocol
 {
     public const string MsgWindow = "window";              // JS → WPF：窗口操作
     public const string MsgBackendStatus = "backend-status"; // WPF → JS：后端状态
+    public const string MsgAuthToken = "auth-token";        // WPF → JS：本地 API 令牌（每会话启动/后端重启刷新）
 
     // window 消息的 action 取值
     public const string ActionMinimize = "minimize";

@@ -24,6 +24,7 @@
 #include "memory_service.h"
 #include "openai_provider.h"
 #include "skills.h"
+#include "validation.h"
 
 namespace srv {
 namespace {
@@ -573,10 +574,10 @@ void registerBotRoutes(httplib::Server& svr) {
     bot.system_prompt = b["system_prompt"].get<std::string>();
     bot.avatar = b.value("avatar", "🤖");
     bot.greeting = b.value("greeting", "");
-    bot.temperature = b.value("temperature", 0.8);
+    bot.temperature = val::clampTemperature(b.value("temperature", 0.8));
     bot.api_base_url = b.value("api_base_url", "");
     bot.api_model = b.value("api_model", "");
-    bot.max_tokens = b.value("max_tokens", 2048);
+    bot.max_tokens = val::clampMaxTokens(b.value("max_tokens", 2048));
     bot.api_type = b.value("api_type", "openai");
     if (bot.api_type != "openai") {
       fail(res, 400, 400, "api_type 仅支持 openai");
@@ -601,10 +602,10 @@ void registerBotRoutes(httplib::Server& svr) {
     if (b.contains("avatar")) bot->avatar = b["avatar"].get<std::string>();
     if (b.contains("greeting")) bot->greeting = b["greeting"].get<std::string>();
     if (b.contains("system_prompt")) bot->system_prompt = b["system_prompt"].get<std::string>();
-    if (b.contains("temperature")) bot->temperature = b["temperature"].get<double>();
+    if (b.contains("temperature")) bot->temperature = val::clampTemperature(b["temperature"].get<double>());
     if (b.contains("api_base_url")) bot->api_base_url = b["api_base_url"].get<std::string>();
     if (b.contains("api_model")) bot->api_model = b["api_model"].get<std::string>();
-    if (b.contains("max_tokens")) bot->max_tokens = b["max_tokens"].get<int>();
+    if (b.contains("max_tokens")) bot->max_tokens = val::clampMaxTokens(b["max_tokens"].get<int64_t>());
     if (b.contains("api_type")) {
       bot->api_type = b["api_type"].get<std::string>();
       if (bot->api_type != "openai") {
@@ -1086,11 +1087,14 @@ void registerConfigRoutes(httplib::Server& svr) {
       if (!key.empty()) db::setSetting("api_key_enc", dpapi::protect(key));
     }
     if (b.contains("model")) db::setSetting("model", b["model"].get<std::string>());
-    if (b.contains("keep_rounds")) db::setSetting("keep_rounds", std::to_string(b["keep_rounds"].get<int>()));
+    // v5：服务端强校验（1–65536 / 0–100 / 1–65535），越界收窄，防前端绕过
+    if (b.contains("keep_rounds"))
+      db::setSetting("keep_rounds", std::to_string(val::clampKeepRounds(b["keep_rounds"].get<int64_t>())));
     if (b.contains("theme")) db::setSetting("theme", b["theme"].get<std::string>());
     if (b.contains("proxy_enabled")) db::setSetting("proxy_enabled", b["proxy_enabled"].get<bool>() ? "1" : "0");
     if (b.contains("proxy_host")) db::setSetting("proxy_host", b["proxy_host"].get<std::string>());
-    if (b.contains("proxy_port")) db::setSetting("proxy_port", std::to_string(b["proxy_port"].get<int>()));
+    if (b.contains("proxy_port"))
+      db::setSetting("proxy_port", std::to_string(val::clampProxyPort(b["proxy_port"].get<int64_t>())));
     if (b.contains("memory_extraction"))
       db::setSetting("memory_extraction",
                      b["memory_extraction"].get<std::string>() == "1" ? "1" : "0");
@@ -1245,8 +1249,9 @@ void registerExportRoute(httplib::Server& svr) {
 
 }  // namespace
 
-void registerRoutes(httplib::Server& svr, const std::string& staticDir) {
-  svr.set_pre_routing_handler([](const httplib::Request& req, httplib::Response& res) {
+void registerRoutes(httplib::Server& svr, const std::string& staticDir,
+                    const std::string& authToken) {
+  svr.set_pre_routing_handler([authToken](const httplib::Request& req, httplib::Response& res) {
     std::string origin = req.get_header_value("Origin");
     bool allowed = origin == "https://app.local" ||
                    origin.rfind("http://localhost:", 0) == 0 ||
@@ -1254,17 +1259,30 @@ void registerRoutes(httplib::Server& svr, const std::string& staticDir) {
     if (allowed) {
       res.set_header("Access-Control-Allow-Origin", origin);
       res.set_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-      res.set_header("Access-Control-Allow-Headers", "Content-Type");
+      res.set_header("Access-Control-Allow-Headers", "Content-Type, X-Orua-Token");
     }
     if (req.method == "OPTIONS") {
       res.status = 204;
+      return httplib::Server::HandlerResponse::Handled;
+    }
+    // v5 DNS-Rebinding 防护：仅当请求声明了跨域 Origin（即浏览器端）且已启用令牌时校验。
+    // 无 Origin 的本机直连（test_api.ps1 / curl）不受影响；头像 GET 由 <img> 直接加载，
+    // 无法携带自定义头 → 前导豁免。
+    const std::string& path = req.path;
+    bool apiPath = path.rfind("/api/v1/", 0) == 0;
+    bool avatarGet = path.size() >= 7 && path.compare(path.size() - 7, 7, "/avatar") == 0;
+    if (!origin.empty() && apiPath && !authToken.empty() && !avatarGet &&
+        req.get_header_value("X-Orua-Token") != authToken) {
+      res.status = 403;
+      res.set_content(errJson(403, "缺少有效 X-Orua-Token").dump(),
+                      "application/json; charset=utf-8");
       return httplib::Server::HandlerResponse::Handled;
     }
     return httplib::Server::HandlerResponse::Unhandled;
   });
 
   svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
-    res.set_content("{\"status\":\"ok\",\"version\":\"4.1.0\"}", "application/json; charset=utf-8");
+    res.set_content("{\"status\":\"ok\",\"version\":\"5.0.0\"}", "application/json; charset=utf-8");
   });
 
   registerSkillRoutes(svr);

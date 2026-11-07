@@ -10,6 +10,9 @@
 namespace ev {
 namespace {
 
+constexpr size_t kMaxInflight = 8;    // 并发 Webhook 上限
+constexpr size_t kMaxQueue = 256;     // 有界队列：满则丢弃最新
+
 struct ParsedUrl {
   std::string host;
   int port = 80;
@@ -71,20 +74,62 @@ void EventBus::emit(const std::string& type, const json& data) {
     }
   }
   for (auto& p : targets) {
-    std::string body = payload.dump();
-    std::thread([p, body]() {
+    scheduleWebhook(p.name, p.url, payload.dump());
+  }
+}
+
+void EventBus::scheduleWebhook(const std::string& name, const std::string& url,
+                               const std::string& body) {
+  std::lock_guard<std::mutex> lk(wm_);
+  if (inflight_ < kMaxInflight) {
+    ++inflight_;
+    std::thread([this, name, url, body]() {
       try {
-        auto u = parseUrl(p.url);
+        auto u = parseUrl(url);
         httplib::Client cli(u.host, u.port);
         cli.set_connection_timeout(2);
         cli.set_read_timeout(2);
         cli.set_write_timeout(2);
         auto res = cli.Post(u.path.c_str(), body, "application/json");
         if (!res || res->status != 200)
-          logx::warn("plugin webhook failed: " + p.name);
+          logx::warn("plugin webhook failed: " + name);
       } catch (const std::exception& e) {
         logx::warn(std::string("plugin webhook exception: ") + e.what());
       }
+      finishWebhook();
+    }).detach();
+    return;
+  }
+  if (queued_ < kMaxQueue) {
+    ++queued_;
+    pending_.push_back(WebhookJob{name, url, body});
+  } else {
+    logx::warn("plugin webhook queue full, dropping: " + name);
+  }
+}
+
+void EventBus::finishWebhook() {
+  std::lock_guard<std::mutex> lk(wm_);
+  if (inflight_ > 0) --inflight_;
+  while (inflight_ < kMaxInflight && !pending_.empty()) {
+    auto job = std::move(pending_.front());
+    pending_.pop_front();
+    --queued_;
+    ++inflight_;
+    std::thread([this, name = job.name, url = job.url, body = job.body]() {
+      try {
+        auto u = parseUrl(url);
+        httplib::Client cli(u.host, u.port);
+        cli.set_connection_timeout(2);
+        cli.set_read_timeout(2);
+        cli.set_write_timeout(2);
+        auto res = cli.Post(u.path.c_str(), body, "application/json");
+        if (!res || res->status != 200)
+          logx::warn("plugin webhook failed: " + name);
+      } catch (const std::exception& e) {
+        logx::warn(std::string("plugin webhook exception: ") + e.what());
+      }
+      finishWebhook();
     }).detach();
   }
 }

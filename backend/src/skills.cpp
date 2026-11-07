@@ -1,15 +1,20 @@
 #include "skills.h"
 
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <winhttp.h>
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 
 #include "db.h"
 #include "logger.h"
@@ -172,6 +177,9 @@ bool isBlockedIpv6(const std::string& h) {
   for (uint16_t v : g)
     if (v != 0) allZero = false;
   if (allZero) return true;                                     // :: 未指定地址
+  if ((g[0] & 0xffc0) == 0xfe80) return true;                   // fe80::/10 链路本地
+  if ((g[0] & 0xfe00) == 0xfc00) return true;                   // fc00::/7 唯一本地（私网）
+  if ((g[0] & 0xffc0) == 0xfec0) return true;                   // fec0::/10 站点本地（弃用仍拒）
   bool headZero = g[0] == 0 && g[1] == 0 && g[2] == 0 && g[3] == 0 && g[4] == 0;
   if (headZero && g[5] == 0 && (g[6] == 0 && (g[7] == 0 || g[7] == 1))) return true;  // :: / ::1
   if (headZero && g[5] == 0xffff) {                               // ::ffff:a.b.c → 按内嵌 IPv4 判定
@@ -225,6 +233,8 @@ json execHttpGet(const json& params) {
     try { port = std::stoi(authority.substr(colon + 1)); } catch (...) {}
   }
   if (isBlockedHost(host)) return {{"error", "拒绝访问本地/内网地址"}};
+  // v5：主机名通过后仍解析+逐 IP 复检，封死 DNS Rebinding
+  if (!resolveAndRecheck(host)) return {{"error", "拒绝访问本地/内网地址"}};
   bool ipv6Literal = host.find(':') != std::string::npos;
   std::string connectHost = ipv6Literal ? "[" + host + "]" : host;   // WinHTTP 要求带括号
 
@@ -287,6 +297,8 @@ json execFileRead(const json& params) {
   if (params.contains("path") && params["path"].is_string())
     p = params["path"].get<std::string>();
   if (p.empty()) return {{"error", "path 为空"}};
+  // v5：文件读取白名单（data 目录 / 系统临时目录 / 设置表追加根目录），封死任意路径读取
+  if (!fileReadAllowed(p)) return {{"error", "路径不在允许读取的目录内"}};
   std::ifstream ifs(p, std::ios::binary);
   if (!ifs) return {{"error", "文件打开失败"}};
   std::string content;
@@ -497,6 +509,84 @@ bool parseRelativeDue(const std::string& in, std::time_t now, std::time_t& out) 
 
 }  // namespace
 
+// v5 DNS-Rebinding 防护：hostname 已通过 isBlockedHost 后，仍要解析出真实 IP 并逐个
+// 复检——拦截「先解析到公网、被攻击者切换回内网」的 rebinding。逐地址转文本后交给
+// isBlockedHost 复用同一套 IP 判定。解析无结果时按「放行」处理（连接阶段自然会失败），
+// 但绝不放进内网地址。
+bool resolveAndRecheck(const std::string& host) {
+  WSADATA wsa{};
+  (void)WSAStartup(MAKEWORD(2, 2), &wsa);
+  struct addrinfo hints {};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  struct addrinfo* res = nullptr;
+  if (getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || !res) {
+    WSACleanup();
+    return true;  // 解析失败 → 连接阶段自然失败，不放行内网段
+  }
+  bool safe = true;
+  for (auto* ai = res; ai; ai = ai->ai_next) {
+    std::string ip;
+    char buf[INET6_ADDRSTRLEN] = {};
+    if (ai->ai_family == AF_INET) {
+      auto* v4 = reinterpret_cast<sockaddr_in*>(ai->ai_addr);
+      inet_ntop(AF_INET, &v4->sin_addr, buf, sizeof(buf));
+      ip = buf;
+    } else if (ai->ai_family == AF_INET6) {
+      auto* v6 = reinterpret_cast<sockaddr_in6*>(ai->ai_addr);
+      inet_ntop(AF_INET6, &v6->sin6_addr, buf, sizeof(buf));
+      ip = buf;
+    } else {
+      continue;
+    }
+    if (isBlockedHost(ip)) {
+      safe = false;
+      break;
+    }
+  }
+  freeaddrinfo(res);
+  WSACleanup();
+  return safe;
+}
+
+// file_read 白名单：允许 OS 临时目录与 data 目录（及其子目录），另支持设置表显式追加根目录。
+// 返回允许/拒绝。拒绝时输出 error 文本供工具回填。
+bool fileReadAllowed(const std::string& rawPath) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  fs::path p = fs::u8path(rawPath);   // 输入按 UTF-8 构造，避免窄字节→ANSI 转换抛异常
+  fs::path abs;
+  if (p.is_absolute()) abs = p.lexically_normal();
+  else abs = (fs::current_path(ec) / p).lexically_normal();
+  if (ec) abs = p.lexically_normal();
+
+  auto under = [](const fs::path& target, const fs::path& root) {
+    std::error_code e2;
+    auto rel = fs::relative(target, root, e2);
+    if (e2) return false;
+    return rel.empty() || (!rel.is_absolute() && rel.u32string().rfind(U"..", 0) != 0);
+  };
+
+  std::string data = db::dataDir();
+  if (!data.empty() && under(abs, fs::path(data))) return true;
+  if (under(abs, fs::temp_directory_path(ec)) && !ec) return true;
+
+  // 允许通过设置表「file_read_allowlist」追加根目录（分号分隔，绝对路径）
+  auto extra = db::getSetting("file_read_allowlist");
+  if (extra && !extra->empty()) {
+    std::string s = *extra;
+    size_t pos = 0;
+    while (pos <= s.size()) {
+      size_t nxt = s.find(';', pos);
+      std::string seg = s.substr(pos, nxt == std::string::npos ? std::string::npos : nxt - pos);
+      if (!seg.empty() && under(abs, fs::path(seg))) return true;
+      if (nxt == std::string::npos) break;
+      pos = nxt + 1;
+    }
+  }
+  return false;
+}
+
 // 主机名归一化 + 内网/回环拒绝（SSRF 防护）：转小写 → 去单个尾点 → 逐条判定。
 // 放在 sk 命名空间（非匿名）里，测试可直接喂裸主机名；行为对同一输入恒定，无副作用。
 bool isBlockedHost(const std::string& host) {
@@ -577,7 +667,7 @@ std::vector<SkillDef> registry() {
        json{{"type", "object"},
             {"properties", json{{"url", json{{"type", "string"}}}}},
             {"required", json::array({"url"})}}},
-      {"file_read", "读取文件", "读取本地文本文件（≤8KB）",
+      {"file_read", "读取文件", "读取本地文本文件（≤8KB，仅限 data 目录/系统临时目录/白名单）",
        json{{"type", "object"},
             {"properties", json{{"path", json{{"type", "string"}}}}},
             {"required", json::array({"path"})}}},

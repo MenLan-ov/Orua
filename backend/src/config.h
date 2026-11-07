@@ -16,6 +16,7 @@ struct ServerConfig {
   std::string theme = "dark";
   double temperature = 0.8;
   std::string static_dir; // 空 = 不提供静态文件（WPF 用虚拟主机，无需此项）
+  std::string auth_token; // 每启动一次生成的本地鉴权令牌；空 = 关闭鉴权（开发模式）
   std::vector<Plugin> plugins;
 };
 ServerConfig load(const std::string& path);

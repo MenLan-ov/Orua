@@ -23,6 +23,7 @@ TEST_CASE("config: 保存后读取往返一致") {
   c.actual_port = 9001;
   c.keep_rounds = 5;
   c.theme = "sakura";
+  c.auth_token = "tok_abc123-_";
   cfg::Plugin p;
   p.name = "demo";
   p.url = "http://127.0.0.1:9000/hook";
@@ -35,6 +36,7 @@ TEST_CASE("config: 保存后读取往返一致") {
   CHECK(got.actual_port == 9001);
   CHECK(got.keep_rounds == 5);
   CHECK(got.theme == "sakura");
+  CHECK(got.auth_token == "tok_abc123-_");
   REQUIRE(got.plugins.size() == 1);
   CHECK(got.plugins[0].name == "demo");
   CHECK(got.plugins[0].url == "http://127.0.0.1:9000/hook");
